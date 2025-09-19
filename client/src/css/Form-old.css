@@ -1,0 +1,21 @@
+.form-back{margin:8px 0;padding:6px 12px}
+.block{border:1px solid #eee;padding:12px;margin:12px 0}
+.test-item-table{width:100%;border-collapse:collapse}
+.test-item-table th,.test-item-table td{border:1px solid #ddd;padding:6px}
+.test-item-table .num{width:60px;text-align:center}
+.test-item-table .action-col{white-space:nowrap}
+.row-drag-over{outline:2px dashed #2d8cf0}
+.modal{position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal-content{background:#fff;max-width:1000px;width:90%;padding:16px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.2)}
+.modal-title{margin:0 0 12px}
+.search-box{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.search-input{padding:6px 8px;border:1px solid #ddd;border-radius:6px}
+.payer-table{width:100%;border-collapse:collapse}
+.payer-table th,.payer-table td{border:1px solid #ddd;padding:6px}
+.payer-table .title-id{width:80px;text-align:center}
+.selected-customer-info,.selected-payer-info{background:#fafafa;padding:8px;border-radius:6px}
+.add-test-item-button{margin:12px 0}
+.add-remove-buttons button{margin-right:4px}
+.copy-button,.add-button,.remove-button{padding:4px 8px}
+.submit{padding:8px 16px;margin:16px 0}
+.drag-handle{opacity:.6}

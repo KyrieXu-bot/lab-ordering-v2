@@ -1,0 +1,666 @@
+/* 全局样式 */
+body {
+    font-family: Arial, sans-serif;
+    background-color: white;
+    color: #333;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+
+}
+
+div {
+    padding: 15px;
+}
+
+div>img {
+    width: 16%;
+    position: absolute;
+    top: 10px;
+    left: 10px;
+}
+
+.titleNote {
+    color: black;
+}
+
+.form-back {
+    position: absolute;
+    right: 50px;
+}
+
+/* 标题样式 */
+h1 {
+    color: white;
+    text-align: center;
+}
+
+h3 {
+    border-bottom: 2px solid #0056b3;
+    color: #0056b3;
+    padding-bottom: 5px;
+}
+
+/* 表单样式 */
+form {
+    background-color: #f8f9fa;
+    border: 1px solid #ccc;
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+fieldset {
+    border: 1px solid #ccc;
+    padding: 10px;
+    margin-bottom: 20px;
+    border-radius: 5px;
+}
+
+legend {
+    color: #0056b3;
+    font-weight: bold;
+    padding: 0 5px;
+}
+
+label {
+    display: inline-block;
+    margin-bottom: 10px;
+    padding: 10px;
+    width: 48%;
+    /* 使得两个输入框可以在同一行显示 */
+}
+
+input[type="text"],
+input[type="number"],
+input[type="email"] {
+    width: calc(100% - 22px);
+    padding: 10px;
+    margin-top: 5px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+    margin-right: 10px;
+}
+
+button {
+    background-color: #0056b3;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    padding: 10px 20px;
+    /* 增加按钮的大小 */
+    font-size: 12px;
+    /* 增加字体大小 */
+
+}
+
+label {
+    margin-right: 10px;
+    font-weight: bold;
+    color: #333;
+    /* Dark grey color for text */
+}
+
+select {
+    flex-grow: 1;
+    padding: 8px;
+    border-radius: 5px;
+    width: 43%;
+    border: 1px solid #ccc;
+    /* Light grey border */
+    background-color: white;
+}
+
+.submit {
+    font-size: 18px;
+    /* 增加字体大小 */
+    padding: 12px 24px;
+    /* 增加按钮的大小 */
+    display: block;
+    /* 使按钮居中 */
+    margin: 20px auto;
+    /* 上下保持20px的间距，水平居中 */
+}
+
+button:hover {
+    background-color: #004494;
+}
+
+/* 特定部分的样式，如地址信息部分 */
+.address-info {
+    font-style: italic;
+    color: #555;
+}
+
+/* 特定布局调整，使检测项目输入框两个一行 */
+.test-item-group {
+    display: flex;
+    justify-content: space-between;
+}
+
+.test-item-group label {
+    flex: 1 1 45%;
+    /* 调整以适应两个输入框一行 */
+    margin-right: 10px;
+    /* 为标签添加右边距 */
+}
+
+.test-item-group label:last-child {
+    margin-right: 0;
+}
+
+
+.test-item-table-wrapper {
+    overflow-x: auto;
+    /* 你也可以加个轻微的内外边距 */
+    margin: 1em 0;
+    padding: 0;
+}
+
+
+/* 表格样式的检测项目 */
+.test-item-table {
+    position: relative;
+    width: 100%;
+    min-width: 1200px;
+    border-collapse: collapse;
+}
+
+.test-item-table th,
+.test-item-table td {
+    border: 1px solid #ccc;
+    padding: 8px;
+    text-align: left;
+    min-width: 120px;
+    white-space: nowrap;
+}
+
+/* 5）专门收窄“序号”列 */
+.test-item-table th.num,
+.test-item-table td.num {
+    width: 30px;
+    min-width: 30px;
+}
+
+/* 加宽"检测项目"列（第 6 列）*/
+.test-item-table th:nth-child(7),
+.test-item-table td:nth-child(7) {
+    width: 400px;
+    min-width: 400px;
+    /* 视具体数字再调 */
+}
+
+
+/* 6）稍微加宽“数量”列（第 9 列）*/
+.test-item-table th:nth-child(10),
+.test-item-table td:nth-child(10) {
+    width: 60px;
+    min-width: 60px;
+    /* 视具体数字再调 */
+}
+
+/* 保持和表格同样的 max-width，居中显示 */
+.add-test-item-button {
+    max-width: 100%;
+    /* 和 .test-item-table 的 min-width 保持一致 */
+    margin: 10px auto;
+    /* 上下留白，左右居中 */
+}
+
+/* 让按钮铺满它的父容器 */
+.add-test-item-button button {
+    width: 100%;
+    padding: 10px 0;
+    /* 垂直内边距可以根据喜好再调 */
+    font-size: 14px;
+}
+
+
+.test-item-table select {
+    width: 160px;
+}
+
+.test-item-table th {
+    background-color: #f8f9fa;
+}
+
+/* 1）把操作列固定在右侧 */
+.test-item-table td.action-col {
+    position: sticky;
+    right: 0;
+    /* 保证这列在最顶层 */
+    z-index: 5;
+    /* 半透明白，结合 backdrop-filter 模糊下面内容 */
+    background-color: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(4px);
+    /* 可选：左侧加个分隔线 */
+    border-left: 1px solid #ddd;
+    /* 给按钮腾出足够空间 */
+    min-width: 100px;
+}
+
+
+/* 2）再让表头的 sticky 更在上层一点 */
+.test-item-table th.action-col {
+    position: sticky;
+    right: 0;
+    z-index: 6;
+    background-color: #f8f9fa;
+    backdrop-filter: none;
+    /* 上下左右都加上边框，和表格其他 th 保持一致 */
+    min-width: 100px;
+}
+
+.add-remove-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.add-button,
+.remove-button {
+    border: none;
+    background-color: #0056b3;
+    cursor: pointer;
+    color: white;
+    font-size: 15px;
+    margin: 0 5px;
+    padding: 10px 10px;
+}
+
+.selected-price {
+    font-size: 14px;
+    padding: 0px 5px;
+}
+
+.input-price {
+    font-size: 16px;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    width: 200px;
+    /* 限制输入框的宽度 */
+}
+
+.input-price:focus {
+    border-color: #0056b3;
+    box-shadow: 0 0 8px rgba(0, 86, 179, 0.2);
+}
+
+/* 新增委托人表格 */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    animation: fadeInOut 0.3s ease-in-out;
+    z-index: 10;
+}
+
+@keyframes fadeInOut {
+    0% {
+        opacity: 0;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+.modal-content {
+    position: relative;
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    width: 80%;
+    max-height: 80%;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.modal-title {
+    text-align: center;
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.search-box {
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-evenly;
+    align-items: baseline;
+    height: 50px;
+    padding: 10px;
+}
+
+.search-input {
+    margin-bottom: 20px;
+    padding: 10px;
+    max-width: 20%;
+    box-sizing: border-box;
+    font-size: 16px;
+}
+
+.table-container {
+    max-height: 400px;
+    min-height: 390px;
+    overflow-y: auto;
+    margin-bottom: 20px;
+}
+
+.selected-hint {
+    font-weight: bold;
+
+}
+
+.payer-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.title-id {
+    max-width: 30px;
+    /* 将 ID 列的宽度限制在最大 30px */
+    width: 30px;
+    /* 确保 ID 列尽量保持为 30px */
+    overflow: hidden;
+    /* 如果内容过长，隐藏溢出部分 */
+}
+
+.payer-table th,
+.payer-table td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    text-align: left;
+    border: 1px solid rgb(163, 163, 163);
+}
+
+.payer-table th:not(.title-id),
+.payer-table td:not(.title-id) {
+    min-width: 90px;
+    /* 为其他列设置最小宽度 90px */
+
+}
+
+.payer-table th {
+    background-color: #f2f2f2;
+}
+
+.payer-table tr:hover {
+    background-color: #f1f1f1;
+    cursor: pointer;
+}
+
+
+.bottom-close-button {
+    align-self: flex-end;
+    padding: 10px 20px;
+    font-size: 16px;
+    margin-top: 20px;
+    cursor: pointer;
+}
+
+/* 选择是否的按钮 */
+.decide-button {
+    display: flex;
+    justify-content: space-evenly;
+}
+
+.decide-button>button:first-child {
+    background: linear-gradient(to right, #1e3c72, #2a5298);
+    /* 深蓝到浅蓝的渐变背景 */
+}
+
+.num {
+    max-width: 40px;
+}
+
+@media print {
+
+    body,
+    html {
+        margin: 0;
+        background-color: white;
+        font-family: 'Arial', sans-serif;
+        height: auto;
+    }
+
+    h1 {
+        color: black;
+        text-align: center;
+    }
+
+    .titleNote {
+        color: black;
+    }
+
+    div,
+    form {
+        margin: 0;
+        padding: 5px;
+        height: auto;
+    }
+
+    h1 {
+        font-size: 12pt;
+        margin-top: 0px;
+        margin-bottom: 2px;
+        font-weight: bold;
+        /* 标题加粗 */
+    }
+
+    h2 {
+        font-size: 10px;
+        margin-top: 2px;
+        margin-bottom: 0px;
+    }
+
+    p {
+        font-size: 8px;
+        margin-top: 2px;
+        margin-bottom: 0px;
+    }
+
+    h3 {
+        font-size: 10px;
+        color: black;
+    }
+
+    label {
+        font-size: 9px;
+        display: block;
+        width: 48%;
+        border: 1px slid black;
+        margin-bottom: 5px;
+        /* 减少标签之间的间距 */
+        padding: 0px;
+
+    }
+
+    input[type="text"],
+    input[type="number"],
+    input[type="email"],
+    select {
+        width: 50%;
+        max-width: none;
+        height: 19px;
+        padding: 2px 5px;
+        margin: 0;
+        border: 1px solid #ccc;
+        /* 给输入框加上边框 */
+        box-sizing: border-box;
+        font-size: 9px;
+    }
+
+
+
+    .add-button,
+    .remove-button,
+    .action-col,
+    button,
+    .prefill,
+    .add-remove-buttons,
+    .hide-on-print,
+    .submit {
+        display: none;
+    }
+
+    fieldset {
+        border: 1px solid #aaa;
+        margin-bottom: 5px;
+        padding: 5px;
+        display: flex;
+        justify-content: space-around;
+    }
+
+    legend {
+        color: black;
+        font-size: 10px;
+    }
+
+
+    .block {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+    }
+
+
+    /* 表格样式的检测项目 */
+    .test-item-table {
+        width: 100%;
+        border-collapse: collapse;
+        color: red;
+    }
+
+    .test-item-table tbody {
+        border: 1px solid black;
+    }
+
+    .test-item-table th,
+    .test-item-table td {
+        min-width: 60px;
+        /* 每个单元格的最小宽度 */
+        border: 1px solid #ccc;
+        font-size: 10px;
+        padding: 2px;
+        text-align: left;
+        margin-right: 0px;
+        word-wrap: break-word;
+        /* 允许内容自动换行 */
+        vertical-align: top;
+        /* 对齐到顶部，以便更好地控制布局 */
+    }
+
+
+    .test-item-table input {
+        width: 100%;
+        /* 调整输入字段和下拉菜单宽度为100% */
+        box-sizing: border-box;
+        /* 包含内边距和边框在内的总宽度 */
+        margin: 0;
+        /* 去除外边距 */
+        padding: 4px;
+        /* 统一输入字段的内边距 */
+        border: 1px solid #ddd;
+        /* 轻微的边框强调 */
+        font-size: 10px;
+        /* 调整字体大小 */
+
+    }
+
+    .test-item-table select {
+        width: 52px;
+    }
+
+    .num {
+        display: none;
+    }
+}
+
+
+@media (max-width: 600px) {
+
+    /* 针对手机屏幕的样式 */
+    h1,
+    h2,
+    p {
+        font-size: 10pt;
+        /* 调整标题和段落字体大小 */
+    }
+
+    h3 {
+        font-size: 12px;
+        /* 调整 h3 字体大小 */
+    }
+
+    label {
+        font-size: 10pt;
+        /* 调整标签字体大小 */
+    }
+
+    input[type="text"],
+    input[type="number"],
+    input[type="email"],
+    select {
+        width: 100%;
+        /* 输入框和选择框宽度100% */
+        height: 30px;
+        /* 增加高度以便更好地点击 */
+        padding: 5px;
+        /* 增加内边距 */
+        font-size: small;
+        /* 确保字体小 */
+    }
+
+    table {
+        display: block;
+        /* 使表格变为块元素 */
+        overflow-x: auto;
+        /* 启用水平滚动 */
+        white-space: nowrap;
+        /* 不允许换行，启用横向滚动 */
+    }
+
+    th,
+    td {
+        font-size: 8pt;
+        /* 确保表格字体小 */
+        padding: 5px;
+        /* 调整单元格内边距 */
+    }
+
+    .add-button,
+    .remove-button,
+    .action-col,
+    button {
+        width: 100%;
+        /* 按钮宽度100% */
+        margin-top: 5px;
+        /* 增加按钮之间的间距 */
+    }
+
+    .test-item-table {
+        display: block;
+        /* 使测试项目表格为块元素 */
+    }
+
+    /* 隐藏不必要的列 */
+    .num {
+        display: none;
+        /* 隐藏序号列 */
+    }
+}
