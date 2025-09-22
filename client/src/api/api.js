@@ -36,3 +36,9 @@ export const getPrices = (testItem, testCondition, testCode) =>
     testCondition: testCondition || '',
     testCode: testCode || ''
   }})
+
+export const generateOrderTemplate = (data) =>
+  axios.post('/api/templates/generate-order-template', data, { responseType: 'blob' })
+
+export const generateProcessTemplate = (data) =>
+  axios.post('/api/templates/generate-process-template', data, { responseType: 'blob' })

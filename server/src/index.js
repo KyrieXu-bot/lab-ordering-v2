@@ -15,6 +15,7 @@ const { router: salesRouter } = require('./routes/salespersons');
 const { router: formRouter } = require('./routes/form');
 const { router: commissionRouter } = require('./routes/commission');
 const { router: documentsRouter } = require('./routes/documents');
+const { router: templatesRouter } = require('./routes/templates');
 
 const app = express();
 app.use(cors());
@@ -34,6 +35,7 @@ app.use('/api/salespersons', salesRouter);
 app.use('/api/form', formRouter);
 app.use('/api/commission', commissionRouter);
 app.use('/api/documents', documentsRouter);
+app.use('/api/templates', templatesRouter);
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

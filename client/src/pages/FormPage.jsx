@@ -9,7 +9,9 @@ import {
   prefillPayment,
   getPrices,
   getSalespersonContact,
-  generateSampleFlow
+  generateSampleFlow,
+  generateOrderTemplate,
+  generateProcessTemplate
 } from '../api/api';
 import { useNavigate } from 'react-router-dom';
 import '../css/Form.css'
@@ -24,6 +26,10 @@ function FormPage() {
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [commissionUrl, setCommissionUrl] = useState('');
   const [flowUrl, setFlowUrl] = useState('');
+  const [orderTemplateUrl, setOrderTemplateUrl] = useState('');
+  const [processTemplateUrl, setProcessTemplateUrl] = useState('');
+  const [orderTemplateFileName, setOrderTemplateFileName] = useState('');
+  const [processTemplateFileName, setProcessTemplateFileName] = useState('');
   const [salespersons, setSalespersons] = useState([]);
   const [salesName, setSalesName] = useState('');
   const [salesEmail, setSalesEmail] = useState('');
@@ -664,7 +670,22 @@ function FormPage() {
       const flowRes = await generateSampleFlow(flowData);
       const flowBlob = new Blob([flowRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
       const flowObjUrl = window.URL.createObjectURL(flowBlob);
-      setCommissionUrl(commissionObjUrl); setFlowUrl(flowObjUrl);
+      
+      // 生成模板文档
+      const orderTemplateRes = await generateOrderTemplate(templateData);
+      const orderTemplateBlob = new Blob([orderTemplateRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const orderTemplateObjUrl = window.URL.createObjectURL(orderTemplateBlob);
+      
+      const processTemplateRes = await generateProcessTemplate(flowData);
+      const processTemplateBlob = new Blob([processTemplateRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const processTemplateObjUrl = window.URL.createObjectURL(processTemplateBlob);
+      
+      setCommissionUrl(commissionObjUrl); 
+      setFlowUrl(flowObjUrl);
+      setOrderTemplateUrl(orderTemplateObjUrl);
+      setProcessTemplateUrl(processTemplateObjUrl);
+      setOrderTemplateFileName(`委托单模板_${orderNum}.docx`);
+      setProcessTemplateFileName(`流转单模板_${orderNum}.docx`);
       setShowDownloadModal(true);
     } catch (error) {
       const msg = error.response?.data?.message || '服务器出现错误，请重试';
@@ -1155,9 +1176,16 @@ function FormPage() {
             <h2>文件已生成</h2>
             <p>请分别点击下面按钮下载：</p>
             <div className='decide-button'>
-              <button onClick={() => downloadFile(commissionUrl, commissionFileName)}>下载委托单</button>
-              <button onClick={() => downloadFile(flowUrl, flowFileName)}>下载流转单</button>
-              <button onClick={() => { URL.revokeObjectURL(commissionUrl); URL.revokeObjectURL(flowUrl); setShowDownloadModal(false); window.location.href = '/'; }}>关闭</button>
+              <button onClick={() => downloadFile(orderTemplateUrl, orderTemplateFileName)}>下载委托单模板</button>
+              <button onClick={() => downloadFile(processTemplateUrl, processTemplateFileName)}>下载流转单模板</button>
+              <button onClick={() => { 
+                URL.revokeObjectURL(commissionUrl); 
+                URL.revokeObjectURL(flowUrl); 
+                URL.revokeObjectURL(orderTemplateUrl); 
+                URL.revokeObjectURL(processTemplateUrl); 
+                setShowDownloadModal(false); 
+                window.location.href = '/'; 
+              }}>关闭</button>
             </div>
           </div>
         </div>
