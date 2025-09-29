@@ -32,14 +32,14 @@ router.get('/', async (req, res, next) => {
       // 兜底：尝试基于 payer_id 或 customer_id 回填基本客户信息
       if (o.payer_id) {
         const [[row]] = await pool.query(
-          `SELECT c.customer_id, c.customer_name, c.address AS customer_address
+          `SELECT c.customer_id, c.customer_name, c.address AS customer_address, NULL as commissioner_id
            FROM payers p JOIN customers c ON c.customer_id = p.customer_id
            WHERE p.payer_id = ? LIMIT 1`, [o.payer_id]
         );
         customer = row || null;
       } else if (o.customer_id) {
         const [[row]] = await pool.query(
-          `SELECT customer_id, customer_name, address AS customer_address
+          `SELECT customer_id, customer_name, address AS customer_address, NULL as commissioner_id
            FROM customers WHERE customer_id = ? LIMIT 1`, [o.customer_id]
         );
         customer = row || null;
@@ -332,13 +332,39 @@ router.post('/', async (req, res, next) => {
       const final_unit_price = unit_price;
       const line_total = unit_price != null && item.quantity ? (Number(unit_price) * Number(item.quantity)) : null;
 
+      // 获取price表信息用于判断项目类型
+      let priceInfo = null;
+      if (item.price_id) {
+        const [priceRows] = await conn.query(
+          `SELECT test_code, category_name, group_id, is_outsourced, department_id 
+           FROM price WHERE price_id = ?`,
+          [item.price_id]
+        );
+        priceInfo = priceRows[0] || null;
+      }
+
+      // 判断是否为标准项目
+      const isStandardProject = priceInfo && 
+        priceInfo.test_code && 
+        !priceInfo.category_name.includes('其他类别') && 
+        priceInfo.group_id;
+
+      // 判断是否为委外项目
+      const isOutsourcedProject = priceInfo && priceInfo.is_outsourced;
+
+      // 判断是否为其他类别项目（有department_id但没有group_id）
+      const isOtherCategoryProject = priceInfo && 
+        priceInfo.category_name.includes('其他类别') && 
+        !priceInfo.group_id && 
+        priceInfo.department_id;
+
       const [r] = await conn.query(
         `INSERT INTO test_items
          (order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
           sample_name, material, sample_type, original_no, sample_preparation, note,
-          arrival_mode, sample_arrival_status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          arrival_mode, sample_arrival_status, status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           order_id,
           item.price_id || null,
@@ -346,15 +372,15 @@ router.post('/', async (req, res, next) => {
           detail_name,
           item.test_code || null,
           item.test_method || null,
-          item.department_id || null,
-          item.group_id || null,
+          (priceInfo && priceInfo.department_id) || item.department_id || null,
+          (priceInfo && priceInfo.group_id) || item.group_id || null,
           item.quantity || 1,
           unit_price,
           null,
           final_unit_price,
           line_total,
           0,
-          0,
+          isOutsourcedProject ? 1 : 0,
           null,
           item.sample_name || null,
           item.material || null,
@@ -369,19 +395,61 @@ router.post('/', async (req, res, next) => {
                 : (payload?.arrivalInfo?.arrivalMethod ? 'on_site' : null)))),
           (item.sample_arrival_status === 'arrived' || item.sample_arrival_status === 'not_arrived')
             ? item.sample_arrival_status
-            : (payload?.arrivalInfo?.sampleArrived === 'yes' ? 'arrived' : 'not_arrived')
+            : (payload?.arrivalInfo?.sampleArrived === 'yes' ? 'arrived' : 'not_arrived'),
+          'new' // 初始状态为new
         ]
       );
       const test_item_id = r.insertId;
 
-      if (assignmentAccount) {
+      let assignedTo = null;
+      let supervisorId = null;
+
+      // 根据项目类型进行自动分配
+      if (isStandardProject) {
+        // 标准项目：分配到对应group_id的组长
+        const [leaderRows] = await conn.query(
+          `SELECT user_id, account, name FROM users 
+           WHERE is_active = 1 AND group_id = ? AND group_role = 'leader' 
+           ORDER BY user_id LIMIT 1`,
+          [priceInfo.group_id]
+        );
+        
+        if (leaderRows.length > 0) {
+          assignedTo = leaderRows[0].user_id;
+          supervisorId = leaderRows[0].user_id; // 组长自己监督自己
+        }
+      } else if (isOutsourcedProject) {
+        // 委外项目：分配到对应department_id的室主任
+        const [deptLeaderRows] = await conn.query(
+          `SELECT user_id, account, name FROM users 
+           WHERE is_active = 1 AND department_id = ? AND group_role = 'leader' 
+           ORDER BY user_id LIMIT 1`,
+          [priceInfo.department_id]
+        );
+        
+        if (deptLeaderRows.length > 0) {
+          assignedTo = deptLeaderRows[0].user_id;
+          supervisorId = deptLeaderRows[0].user_id; // 室主任自己监督自己
+        }
+      } else if (assignmentAccount) {
+        // 兜底：使用原来的分配逻辑
+        assignedTo = assignmentAccount;
+      }
+
+      // 创建分配记录
+      if (assignedTo) {
         await conn.query(
           `INSERT INTO assignments (test_item_id, assigned_to, supervisor_id, is_active, note, created_by)
-           VALUES (?, ?, NULL, 1, NULL, ?)`,
-          [test_item_id, assignmentAccount, created_by]
+           VALUES (?, ?, ?, 1, NULL, ?)`,
+          [test_item_id, assignedTo, supervisorId, created_by]
         );
-        // 同步 current_assignee 字段（兼容旧查询）
-        await conn.query(`UPDATE test_items SET current_assignee = ? WHERE test_item_id = ?`, [assignmentAccount, test_item_id]);
+        
+        // 更新test_items状态和当前执行人
+        const status = assignedTo ? 'assigned' : 'new';
+        await conn.query(
+          `UPDATE test_items SET current_assignee = ?, status = ? WHERE test_item_id = ?`, 
+          [assignedTo, status, test_item_id]
+        );
       }
     }
 

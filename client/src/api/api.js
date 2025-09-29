@@ -12,6 +12,8 @@ export const generateSampleFlow = (data) =>
 export const getSalesperson = () => axios.get('/api/salespersons')
 export const getSalespersonContact = (account) =>
   axios.get('/api/salespersons/contact', { params: { account } })
+export const getSalespersonByCustomer = (customer_id) =>
+  axios.get('/api/salespersons/by-customer', { params: { customer_id } })
 
 export const getCustomers = (customerNameTerm, contactNameTerm, contactPhoneTerm) =>
   axios.get('/api/form/customers', { params: {

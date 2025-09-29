@@ -9,6 +9,7 @@ import {
   prefillPayment,
   getPrices,
   getSalespersonContact,
+  getSalespersonByCustomer,
   generateSampleFlow,
   generateOrderTemplate,
   generateProcessTemplate
@@ -82,7 +83,6 @@ function FormPage() {
       contactPhoneNum: '',
       contactEmail: ''
     },
-    vatType: '',
     serviceType: '',
     sampleSolutionType: '',
     sampleReturnInfo: {
@@ -147,6 +147,7 @@ function FormPage() {
     test_method: p.test_standard,
     unit_price: p.unit_price,
     department_id: p.department_id,
+    group_id: p.group_id,
   });
 
   const formatTestItemDisplay = (ti = {}) => {
@@ -256,7 +257,6 @@ function FormPage() {
     if (!formData.orderNum) { alert('请先输入委托单号'); return; }
     try {
       const { data } = await getCommission(formData.orderNum);
-      console.log(data)
       setSelectedCustomer(data.customer);
       setSelectedPayer(data.payer);
       if (data.testItems[0]?.assignment_accounts?.length > 0) {
@@ -277,7 +277,6 @@ function FormPage() {
         reportHeader: String(data.reportInfo?.header_type || ''),
         reportHeaderAdditionalInfo: data.reportInfo?.header_other || '',
         reportForm: String(data.reportInfo?.format_type || ''),
-        vatType: String(data.vatType || ''),
         serviceType: String(data.orderInfo?.service_type || ''),
         reportSeals: seals,
         deliveryDays: data.orderInfo?.delivery_days_after_receipt || '',
@@ -316,9 +315,13 @@ function FormPage() {
       ...prev,
       testItems: prev.testItems.map((item, i) => {
         if (i !== index) return item;
-        const updated = { ...item, [field]: value, ...(field === 'test_item' ? { price_id: null } : {}) };
+        const currentValue = item[field];
+        // 对于单选框字段，如果点击的是已选中的值，则取消选中
+        const isRadioField = ['arrival_mode', 'sample_arrival_status'].includes(field);
+        const newValue = isRadioField && currentValue === value ? '' : value;
+        const updated = { ...item, [field]: newValue, ...(field === 'test_item' ? { price_id: null } : {}) };
         if (field === 'sampleType') {
-          if (String(value) === '5') updated.sampleTypeCustom = '';
+          if (String(newValue) === '5') updated.sampleTypeCustom = '';
           else delete updated.sampleTypeCustom;
         }
         return updated;
@@ -362,7 +365,14 @@ function FormPage() {
   const handleOtherRequirementsChange = (e) => { setFormData(prev => ({ ...prev, otherRequirements: e.target.value })); };
   const handleSubcontractingChange = (e) => { setFormData(prev => ({ ...prev, subcontractingNotAccepted: e.target.checked })); };
   const handleInputChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
-  const handleNestedChange = (parent, name, value) => { setFormData(prev => ({ ...prev, [parent]: { ...prev[parent], [name]: value } })); };
+  const handleNestedChange = (parent, name, value) => { 
+    setFormData(prev => {
+      const currentValue = prev[parent][name];
+      // 如果点击的是已选中的单选框，则取消选中
+      const newValue = currentValue === value ? '' : value;
+      return { ...prev, [parent]: { ...prev[parent], [name]: newValue } };
+    });
+  };
 
   const handleHazardChange = (key, checked) => {
     setFormData(prev => {
@@ -390,7 +400,21 @@ function FormPage() {
     const { value, checked } = e.target;
     setFormData(prev => ({ ...prev, reportSeals: checked ? [...prev.reportSeals, value] : prev.reportSeals.filter(v => v !== value) }));
   };
-  const handleRadioChange = (event) => { setFormData({ ...formData, [event.target.name]: event.target.value }); };
+  const handleRadioChange = (event) => { 
+    const { name, value } = event.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  // 新增：处理单选框点击，支持取消选中
+  const handleRadioClick = (name, value) => {
+    setFormData(prev => {
+      if (prev[name] === value) {
+        return { ...prev, [name]: '' };
+      } else {
+        return { ...prev, [name]: value };
+      }
+    });
+  };
   const handleReportHeaderChange = (e) => { setFormData(prev => ({ ...prev, reportHeader: e.target.value })); };
   const handleReportFormChange = (e) => { setFormData(prev => ({ ...prev, reportForm: e.target.value })); };
   const removeTestItem = (index) => { setFormData(prev => ({ ...prev, testItems: prev.testItems.filter((_, i) => i !== index) })); };
@@ -421,11 +445,10 @@ function FormPage() {
     if (!window.confirm('请确认填写的信息是否正确，确认无误再提交')) return;
     if (!formData.salesPerson) { alert('提交失败！服务方联系人为必填项，请选择业务员'); return; }
     if (!selectedCustomer) { alert('提交失败！请先选择委托方'); return; }
-    if (!selectedCustomer.commissioner_id) {
+    if (!selectedCustomer.customer_id) {
       alert('提交失败！未选择客户库中的委托方，请选择后重试。');
       return;
     }
-    if (!formData.vatType) { alert('提交失败！发票类型为必填项，请选择增值税发票类型'); return; }
     if (!selectedPayer) { alert('提交失败！请先选择付款方'); return; }
     if (!formData.serviceType) { alert('提交失败！周期类型为必填项，请重新选择'); return; }
     if (formData.reportType.length === 0) { alert('提交失败！报告文档为必填项，请重新选择'); return; }
@@ -469,7 +492,7 @@ function FormPage() {
         report_seals: formData.reportSeals,
         delivery_days_after_receipt: formData.deliveryDays !== '' ? Number(formData.deliveryDays) : null
       },
-      vatType: formData.vatType,
+      vatType: '1', // 默认增值税普通发票
       reportInfo: {
         type: formData.reportType,
         paper_report_shipping_type: formData.paperReportShippingType,
@@ -509,8 +532,8 @@ function FormPage() {
         order_num: response.data.orderNum,
         other_requirements: commissionData.orderInfo.other_requirements || '',
         subcontractingNotAcceptedSymbol: commissionData.orderInfo.subcontracting_not_accepted ? '☑' : '☐',
-        invoiceType1Symbol: commissionData.vatType === '1' ? '☑' : '☐',
-        invoiceType2Symbol: commissionData.vatType === '2' ? '☑' : '☐',
+        invoiceType1Symbol: '☑', // 默认增值税普通发票
+        invoiceType2Symbol: '☐',
         reportContent1Symbol: commissionData.reportInfo.type.includes(1) ? '☑' : '☐',
         reportContent2Symbol: commissionData.reportInfo.type.includes(2) ? '☑' : '☐',
         reportContent3Symbol: commissionData.reportInfo.type.includes(3) ? '☑' : '☐',
@@ -695,6 +718,34 @@ function FormPage() {
 
   const handleCustomerSelect = (customer) => {
     setSelectedCustomer(customer);
+    
+    // 根据客户ID获取对应的业务员信息
+    if (customer.customer_id) {
+      getSalespersonByCustomer(customer.customer_id)
+        .then(response => {
+          const salesperson = response.data;
+          console.log('业务员信息:', salesperson);
+          setFormData(prev => ({ ...prev, salesPerson: salesperson.account }));
+          setSalesName(salesperson.name);
+          setSalesEmail(salesperson.email);
+          setSalesPhone(salesperson.phone);
+          console.log('设置后的状态:', {
+            salesPerson: salesperson.account,
+            salesName: salesperson.name,
+            salesEmail: salesperson.email,
+            salesPhone: salesperson.phone
+          });
+        })
+        .catch(error => {
+          console.error('获取业务员信息失败:', error);
+          // 如果获取失败，清空业务员信息
+          setFormData(prev => ({ ...prev, salesPerson: '' }));
+          setSalesName('');
+          setSalesEmail('');
+          setSalesPhone('');
+        });
+    }
+    
     try {
       prefillPayment(customer.commissioner_id)
         .then(response => {
@@ -719,18 +770,6 @@ function FormPage() {
           <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="请输入委托单号或留空自动生成" />
         </label>
         <button type="button" onClick={handlePrefill} style={{ height: 32 }}>预填</button>
-        <h3>服务方信息 Receiver Information</h3>
-        <p>Receiver Name：集萃新材料研发有限公司</p>
-        <label>联系人 Contact：&nbsp;<span style={{ color: 'red' }}>*</span></label>
-        <select name="salesPerson" value={formData.salesPerson} onChange={handleSalespersonChange}>
-          <option value="">请选择业务员/空值</option>
-          {salespersons.map(person => (<option key={person.account} value={person.account}>{person.name} ({person.account})</option>))}
-        </select>
-        {salesEmail && <p><strong>邮箱 E-mail：{salesEmail}</strong></p>}
-        {salesPhone && <p><strong>联系电话 Tel：{salesPhone}</strong></p>}
-        <p>地址 Address：江苏省苏州市相城区青龙港路286号1号楼</p>
-        <p>加★内容为必填项The field marked with★must be filled.</p>
-
         <h3>委托方信息 Applicant Information&nbsp;<span style={{ color: 'red' }}>*</span></h3>
         <div className="block">
           <button type="button" onClick={() => setShowCustomerModal(true)}>选择委托方</button>
@@ -746,13 +785,21 @@ function FormPage() {
           <p className='titleNote'>注：以上信息将显示在报告中，请仔细填写，填写语言需与报告语言一致。报告签发后修改需支付RMB 100元/份。<br/>The above information will appear in the report...</p>
         </div>
 
+        {/* 服务方信息 - 根据委托方自动带出 */}
+        {selectedCustomer && (
+          <div>
+            <h3>服务方信息 Receiver Information</h3>
+            <p>Receiver Name：集萃新材料研发有限公司</p>
+            <p><strong>联系人 Contact：{salesName || '未选择'}</strong></p>
+            {salesEmail && <p><strong>邮箱 E-mail：{salesEmail}</strong></p>}
+            {salesPhone && <p><strong>联系电话 Tel：{salesPhone}</strong></p>}
+            <p>地址 Address：江苏省苏州市相城区青龙港路286号1号楼</p>
+            <p>加★内容为必填项The field marked with★must be filled.</p>
+          </div>
+        )}
+
         <h3>付款方信息 Payer Information&nbsp;<span style={{ color: 'red' }}>*</span></h3>
         <div className="block">
-          <fieldset>
-            <legend>发票类型&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-            <label><input type="radio" name="vatType" value="1" onChange={handleRadioChange} checked={formData.vatType === '1'} /> 增值税普通发票</label>
-            <label><input type="radio" name="vatType" value="2" onChange={handleRadioChange} checked={formData.vatType === '2'} /> 增值税专用发票</label>
-          </fieldset>
           <button type="button" onClick={() => setShowPayerModal(true)}> 选择付款方 </button>
           {selectedPayer && (
             <div className="selected-payer-info">
@@ -773,9 +820,9 @@ function FormPage() {
 
         <fieldset>
           <legend>周期类型 Period Type&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-          <label><input type="radio" name="serviceType" value="1" onChange={handleRadioChange} checked={formData.serviceType === '1'} /> 正常 Standard</label>
-          <label><input type="radio" name="serviceType" value="2" onChange={handleRadioChange} checked={formData.serviceType === '2'} /> 加急 Urgent（加收50%检测费用）</label>
-          <label><input type="radio" name="serviceType" value="3" onChange={handleRadioChange} checked={formData.serviceType === '3'} /> 特急（加收100%检测费用）</label>
+          <label><input type="radio" name="serviceType" value="1" onClick={() => handleRadioClick('serviceType', '1')} checked={formData.serviceType === '1'} readOnly /> 正常 Standard</label>
+          <label><input type="radio" name="serviceType" value="2" onClick={() => handleRadioClick('serviceType', '2')} checked={formData.serviceType === '2'} readOnly /> 加急 Urgent（加收50%检测费用）</label>
+          <label><input type="radio" name="serviceType" value="3" onClick={() => handleRadioClick('serviceType', '3')} checked={formData.serviceType === '3'} readOnly /> 特急（加收100%检测费用）</label>
           <label style={{ display: 'block', marginTop: 8 }}>交付时间 Delivery time：收样后
             <input type="number" name="deliveryDays" min="0" value={formData.deliveryDays} onChange={handleInputChange} style={{ width: '4em', margin: '0 4px' }} /> 个工作日
           </label>
@@ -804,9 +851,9 @@ function FormPage() {
 
           <fieldset>
             <legend>纸质版报告寄送地址 Paper delivery address</legend>
-            <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} /> 邮寄到委托方</label>
-            <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} /> 邮寄到付款方</label>
-            <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} /> 其他</label>
+            <label><input type="radio" name="paperReportShippingType" value="1" onClick={() => handleRadioClick('paperReportShippingType', '1')} checked={formData.paperReportShippingType === '1'} readOnly /> 邮寄到委托方</label>
+            <label><input type="radio" name="paperReportShippingType" value="2" onClick={() => handleRadioClick('paperReportShippingType', '2')} checked={formData.paperReportShippingType === '2'} readOnly /> 邮寄到付款方</label>
+            <label><input type="radio" name="paperReportShippingType" value="3" onClick={() => handleRadioClick('paperReportShippingType', '3')} checked={formData.paperReportShippingType === '3'} readOnly /> 其他</label>
             {formData.paperReportShippingType === '3' && (
               <label>请输入地址、收件人和电话:
                 <input type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} />
@@ -817,7 +864,7 @@ function FormPage() {
           <fieldset>
             <legend>报告抬头 Report Header&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportHeaderOptions).map(option => (
-              <label key={option}><input type="radio" name="reportHeader" value={reportHeaderOptions[option]} onChange={handleReportHeaderChange} checked={formData.reportHeader === String(reportHeaderOptions[option])} /> {option}</label>
+              <label key={option}><input type="radio" name="reportHeader" value={reportHeaderOptions[option]} onClick={() => handleRadioClick('reportHeader', String(reportHeaderOptions[option]))} checked={formData.reportHeader === String(reportHeaderOptions[option])} readOnly /> {option}</label>
             ))}
             {formData.reportHeader === '2' && (
               <label style={{ display: 'block', marginTop: 8 }}>其他(地址/收件人/电话)Others
@@ -829,7 +876,7 @@ function FormPage() {
           <fieldset>
             <legend>报告版式 Report Format&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportFormOptions).map(option => (
-              <label key={option}><input type="radio" name="reportForm" value={reportFormOptions[option]} onChange={handleReportFormChange} checked={formData.reportForm === String(reportFormOptions[option])} /> {option}</label>
+              <label key={option}><input type="radio" name="reportForm" value={reportFormOptions[option]} onClick={() => handleRadioClick('reportForm', String(reportFormOptions[option]))} checked={formData.reportForm === String(reportFormOptions[option])} readOnly /> {option}</label>
             ))}
           </fieldset>
         </>)}
@@ -908,7 +955,8 @@ function FormPage() {
                           type="radio"
                           name={`arrival_method_${index}`}
                           checked={(item.arrival_mode || '') === opt.key || ((item.arrival_mode === 'delivery') && opt.key === 'mail')}
-                          onChange={() => handleTestItemChange(index, 'arrival_mode', opt.key)}
+                          onClick={() => handleTestItemChange(index, 'arrival_mode', opt.key)}
+                          readOnly
                         /> {opt.label}
                       </label>
                     ))}
@@ -919,7 +967,8 @@ function FormPage() {
                         type="radio"
                         name={`sample_arrived_${index}`}
                         checked={(item.sample_arrival_status || 'arrived') === 'arrived'}
-                        onChange={() => handleTestItemChange(index, 'sample_arrival_status', 'arrived')}
+                        onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'arrived')}
+                        readOnly
                       /> 是 Yes
                     </label>
                     <label>
@@ -927,7 +976,8 @@ function FormPage() {
                         type="radio"
                         name={`sample_arrived_${index}`}
                         checked={(item.sample_arrival_status || 'arrived') === 'not_arrived'}
-                        onChange={() => handleTestItemChange(index, 'sample_arrival_status', 'not_arrived')}
+                        onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'not_arrived')}
+                        readOnly
                       /> 否 No
                     </label>
                   </td>
@@ -938,7 +988,7 @@ function FormPage() {
                       <option value="0">否 No</option>
                     </select>
                   </td>
-                  <td><input type="number" min="0" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
+                  <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
                   <td><input type="number" min="0" style={{ width: 50 + 'px' }} value={item.deadline} onChange={(e) => handleTestItemChange(index, 'deadline', e.target.value)} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => dept.department_id === item.department_id)?.department_name || '未知部门'}</span></td>
@@ -997,7 +1047,7 @@ function FormPage() {
             <p>样品磁性 Sample magnetism:&nbsp;<span style={{ color: 'red' }}>*</span></p>
             {magnetismOptions.map(opt => (
               <label key={opt.key} style={{ marginRight: 12 }}>
-                <input type="radio" name="magnetism" checked={formData.sampleRequirements.magnetism === opt.key} onChange={() => handleNestedChange('sampleRequirements', 'magnetism', opt.key)} /> {opt.label}
+                <input type="radio" name="magnetism" checked={formData.sampleRequirements.magnetism === opt.key} onClick={() => handleNestedChange('sampleRequirements', 'magnetism', opt.key)} readOnly /> {opt.label}
               </label>
             ))}
           </div>
@@ -1006,39 +1056,39 @@ function FormPage() {
             <p>样品导电性 Sample conductivity:&nbsp;<span style={{ color: 'red' }}>*</span></p>
             {conductivityOptions.map(opt => (
               <label key={opt.key} style={{ marginRight: 12 }}>
-                <input type="radio" name="conductivity" checked={formData.sampleRequirements.conductivity === opt.key} onChange={() => handleNestedChange('sampleRequirements', 'conductivity', opt.key)} /> {opt.label}
+                <input type="radio" name="conductivity" checked={formData.sampleRequirements.conductivity === opt.key} onClick={() => handleNestedChange('sampleRequirements', 'conductivity', opt.key)} readOnly /> {opt.label}
               </label>
             ))}
           </div>
           <hr />
           <div className="sample-section">
             <p>2. 是否可以破坏 Can it be broken:&nbsp;<span style={{ color: 'red' }}>*</span></p>
-            <label style={{ marginRight: 12 }}><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'yes'} onChange={() => handleNestedChange('sampleRequirements', 'breakable', 'yes')} /> 是 Yes</label>
-            <label><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'no'} onChange={() => handleNestedChange('sampleRequirements', 'breakable', 'no')} /> 否 No</label>
+            <label style={{ marginRight: 12 }}><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'yes'} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'yes')} readOnly /> 是 Yes</label>
+            <label><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'no'} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'no')} readOnly /> 否 No</label>
           </div>
           <hr />
           <div className="sample-section">
             <p>3. 是否孤品 (As shown) :&nbsp;<span style={{ color: 'red' }}>*</span></p>
-            <label style={{ marginRight: 12 }}><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'yes'} onChange={() => handleNestedChange('sampleRequirements', 'brittle', 'yes')} /> 是 Yes</label>
-            <label><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'no'} onChange={() => handleNestedChange('sampleRequirements', 'brittle', 'no')} /> 否 No</label>
+            <label style={{ marginRight: 12 }}><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'yes'} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'yes')} readOnly /> 是 Yes</label>
+            <label><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'no'} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'no')} readOnly /> 否 No</label>
           </div>
         </fieldset>
 
         <fieldset>
           <legend>余样处置 Sample Handling&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-          <label><input type="radio" name="sampleSolutionType" value="1" onChange={handleRadioChange} checked={formData.sampleSolutionType === '1'} />由服务方处理（样品留存90天，逾期销毁）</label>
-          <label><input type="radio" name="sampleSolutionType" value="2" onChange={handleRadioChange} checked={formData.sampleSolutionType === '2'} />委托方自取</label>
-          <label><input type="radio" name="sampleSolutionType" value="3" onChange={handleRadioChange} checked={formData.sampleSolutionType === '3'} />服务方协助寄回 (到付)</label>
+          <label><input type="radio" name="sampleSolutionType" value="1" onClick={() => handleRadioClick('sampleSolutionType', '1')} checked={formData.sampleSolutionType === '1'} readOnly />由服务方处理（样品留存90天，逾期销毁）</label>
+          <label><input type="radio" name="sampleSolutionType" value="2" onClick={() => handleRadioClick('sampleSolutionType', '2')} checked={formData.sampleSolutionType === '2'} readOnly />委托方自取</label>
+          <label><input type="radio" name="sampleSolutionType" value="3" onClick={() => handleRadioClick('sampleSolutionType', '3')} checked={formData.sampleSolutionType === '3'} readOnly />服务方协助寄回 (到付)</label>
           {formData.sampleSolutionType === '3' && (
             <div className="nested-return-address" style={{ paddingLeft: 20 }}>
-              <label><input type="radio" name="returnAddressOption" value="same" onChange={e => handleNestedChange('sampleReturnInfo', 'returnAddressOption', e.target.value)} checked={formData.sampleReturnInfo.returnAddressOption === 'same'} />同委托方信息</label>
-              <label><input type="radio" name="returnAddressOption" value="other" onChange={e => handleNestedChange('sampleReturnInfo', 'returnAddressOption', e.target.value)} checked={formData.sampleReturnInfo.returnAddressOption === 'other'} />其他 Others (Address/Recipient/Tel):</label>
+              <label><input type="radio" name="returnAddressOption" value="same" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'same')} checked={formData.sampleReturnInfo.returnAddressOption === 'same'} readOnly />同委托方信息</label>
+              <label><input type="radio" name="returnAddressOption" value="other" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'other')} checked={formData.sampleReturnInfo.returnAddressOption === 'other'} readOnly />其他 Others (Address/Recipient/Tel):</label>
               {formData.sampleReturnInfo.returnAddressOption === 'other' && (
                 <input type="text" name="sampleShippingAddress" placeholder="填写退回地址/收件人/电话" value={formData.sampleShippingAddress} onChange={handleInputChange} style={{ display: 'block', marginTop: 4 }} />
               )}
             </div>
           )}
-          <label><input type="radio" name="sampleSolutionType" value="4" onChange={handleRadioChange} checked={formData.sampleSolutionType === '4'} />无剩余样品</label>
+          <label><input type="radio" name="sampleSolutionType" value="4" onClick={() => handleRadioClick('sampleSolutionType', '4')} checked={formData.sampleSolutionType === '4'} readOnly />无剩余样品</label>
         </fieldset>
 
         <button type="submit" className="submit">提交表单并生成Word</button>
