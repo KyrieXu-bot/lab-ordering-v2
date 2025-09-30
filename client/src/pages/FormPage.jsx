@@ -66,8 +66,8 @@ function FormPage() {
   const navigate = useNavigate();
 
   const arrivalMethodOptions = [
-    { key: 'on_site', label: '现场到达 On-site' },
-    { key: 'mail',   label: '寄样 By mail' },
+    { key: 'on_site', label: '现场到达' },
+    { key: 'mail',   label: '寄样' },
   ];
 
   // 初始化表单数据
@@ -969,7 +969,7 @@ function FormPage() {
                         checked={(item.sample_arrival_status || 'arrived') === 'arrived'}
                         onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'arrived')}
                         readOnly
-                      /> 是 Yes
+                      /> 是
                     </label>
                     <label>
                       <input
@@ -978,7 +978,7 @@ function FormPage() {
                         checked={(item.sample_arrival_status || 'arrived') === 'not_arrived'}
                         onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'not_arrived')}
                         readOnly
-                      /> 否 No
+                      /> 否
                     </label>
                   </td>
                   <td>
@@ -988,7 +988,7 @@ function FormPage() {
                       <option value="0">否 No</option>
                     </select>
                   </td>
-                  <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
+                  <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
                   <td><input type="number" min="0" style={{ width: 50 + 'px' }} value={item.deadline} onChange={(e) => handleTestItemChange(index, 'deadline', e.target.value)} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => dept.department_id === item.department_id)?.department_name || '未知部门'}</span></td>

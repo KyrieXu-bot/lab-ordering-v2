@@ -182,8 +182,8 @@ router.get('/', async (req, res, next) => {
       // arrival fields moved to test_items level
     };
 
-    // vatType 从 reports.vat_type 或默认 '1'
-    const vatType = r ? String(r.vat_type) : '1';
+    // vatType 默认为 '1'（不再从reports表读取）
+    const vatType = '1';
 
     // 6. 返回给前端（结构与前端预填期望一致）
     res.json({
@@ -280,11 +280,10 @@ router.post('/', async (req, res, next) => {
     // 1) 插入 reports（如果前端传了任何 reportInfo 可写入）
     await conn.query(
       `INSERT INTO reports
-        (order_id, vat_type, report_type, paper_report_shipping_type, report_additional_info, header_type, header_other, format_type, report_seals)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (order_id, report_type, paper_report_shipping_type, report_additional_info, header_type, header_other, format_type, report_seals)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         order_id,
-        payload.vatType || 1,
         reportInfo.type ? JSON.stringify(reportInfo.type) : null,
         reportInfo.paper_report_shipping_type || null,
         reportInfo.report_additional_info || null,
