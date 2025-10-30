@@ -63,9 +63,10 @@ router.post('/generate-order-template', async (req, res) => {
     const report = doc.getZip().generate({ type: 'nodebuffer' });
     console.log('文档生成成功，大小:', report.length);
 
-    // 设置响应头
+    // 设置响应头（命名：委托单号+客户名称+委托联系人名称）
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    const fileName = `委托单模板_${templateData.order_num || 'template'}.docx`;
+    const safe = (s) => (typeof s === 'string' ? s.trim() : '');
+    const fileName = `${safe(templateData.order_num)}-${safe(templateData.customer_name)}-${safe(templateData.customer_contactName)}.docx`;
     const encodedFileName = encodeURIComponent(fileName);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`);
     
@@ -137,9 +138,9 @@ router.post('/generate-process-template', async (req, res) => {
     const report = doc.getZip().generate({ type: 'nodebuffer' });
     console.log('流转单文档生成成功，大小:', report.length);
 
-    // 设置响应头
+    // 设置响应头（命名：{委托单号}_流转单.docx）
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    const fileName = `流转单模板_${flowData.order_num || 'template'}.docx`;
+    const fileName = `${flowData.order_num}_流转单.docx`;
     const encodedFileName = encodeURIComponent(fileName);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`);
     

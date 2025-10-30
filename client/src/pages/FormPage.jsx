@@ -153,7 +153,7 @@ function FormPage() {
   const formatTestItemDisplay = (ti = {}) => {
     const name = ti.test_item || '';
     const price = ti.unit_price != null && String(ti.unit_price).trim() !== ''
-      ? ` (单价${ti.unit_price}元)`
+      ? ` (单价${ti.unit_price})`
       : '';
     return name + price;
   };
@@ -255,15 +255,36 @@ function FormPage() {
 
   const handlePrefill = async () => {
     if (!formData.orderNum) { alert('请先输入委托单号'); return; }
+    
+    // 检查委托单号是否包含特殊字符
+    const specialChars = /[\s_.,\/?\-=]/;
+    if (specialChars.test(formData.orderNum)) {
+      alert('委托单号不能包含空格、下划线、点号、逗号、斜杠、问号、连字符或等号等特殊字符！\nTask number cannot contain special characters like spaces, underscores, dots, commas, slashes, question marks, hyphens or equals signs!');
+      return;
+    }
+    
     try {
       const { data } = await getCommission(formData.orderNum);
+      console.log("data", data);
       setSelectedCustomer(data.customer);
       setSelectedPayer(data.payer);
-      if (data.testItems[0]?.assignment_accounts?.length > 0) {
-        const acct = data.testItems[0].assignment_accounts.find(acct => acct.includes('YW'));
+      
+      // 处理服务方信息
+      if (data.serviceInfo) {
+        // 使用后端返回的serviceInfo
+        const acct = data.serviceInfo.account;
+        setFormData(f => ({ ...f, salesPerson: acct }));
+        setSalesEmail(data.serviceInfo.email);
+        setSalesPhone(data.serviceInfo.phone);
+        setSalesName(data.serviceInfo.name);
+      } else if (data.testItems[0]?.assignment_accounts?.length > 0) {
+        // 兜底：如果后端没有返回serviceInfo，使用原有逻辑
+        const acct = data.testItems[0].assignment_accounts.find(acct => acct && acct.includes('YW'));
         if (acct) {
+          console.log("acct", acct);
           setFormData(f => ({ ...f, salesPerson: acct }));
           const resp = await getSalespersonContact(acct);
+          console.log("resp", resp.data);
           setSalesEmail(resp.data.user_email); setSalesPhone(resp.data.user_phone_num);
           setSalesName((salespersons.find(s => s.account === acct)?.name || ''));
         }
@@ -351,20 +372,47 @@ function FormPage() {
     });
   };
 
-  const handleTestItemCodeEnter = (e, index) => {
+  const handleTestItemCodeEnter = async (e, index) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     const raw = (formData.testItems[index]?.test_item || '').trim();
     if (!raw) return;
-    const matches = priceList.filter(p => (p.test_code || '').toUpperCase() === raw.toUpperCase());
-    if (matches.length === 1) { applyPriceToRow(index, matches[0]); }
-    else if (matches.length > 1) { setSelectedTestIndex(index); setSearchTestCode(raw); setShowPriceModal(true); }
-    else { alert(`未找到项目代码：${raw}`); }
+    // 先在本地列表中匹配（去除空格并不区分大小写）
+    const upper = raw.toUpperCase();
+    const matchesLocal = priceList.filter(p => ((p.test_code || '').trim().toUpperCase() === upper));
+    if (matchesLocal.length === 1) { applyPriceToRow(index, matchesLocal[0]); return; }
+    if (matchesLocal.length > 1) { setSelectedTestIndex(index); setSearchTestCode(raw); setShowPriceModal(true); return; }
+    // 若本地未命中，按 code 精确向后端检索，避免初始300条限制导致漏匹配
+    try {
+      const resp = await getPrices('', '', raw);
+      const rows = Array.isArray(resp.data) ? resp.data : [];
+      const exact = rows.filter(p => ((p.test_code || '').trim().toUpperCase() === upper));
+      if (exact.length === 1) { applyPriceToRow(index, exact[0]); return; }
+      if (rows.length > 1) { setSelectedTestIndex(index); setSearchTestCode(raw); setShowPriceModal(true); return; }
+      if (rows.length === 1) { applyPriceToRow(index, rows[0]); return; }
+      alert(`未找到项目代码：${raw}`);
+    } catch (err) {
+      console.error('按代码检索价目失败', err);
+      alert(`未找到项目代码：${raw}`);
+    }
   };
 
   const handleOtherRequirementsChange = (e) => { setFormData(prev => ({ ...prev, otherRequirements: e.target.value })); };
   const handleSubcontractingChange = (e) => { setFormData(prev => ({ ...prev, subcontractingNotAccepted: e.target.checked })); };
-  const handleInputChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
+  const handleInputChange = (e) => { 
+    const { name, value } = e.target; 
+    
+    // 如果是委托单号输入，进行特殊字符检查
+    if (name === 'orderNum') {
+      const specialChars = /[\s_.,\/?\-=]/;
+      if (specialChars.test(value)) {
+        alert('委托单号不能包含空格、下划线、点号、逗号、斜杠、问号、连字符或等号等特殊字符！\nTask number cannot contain special characters like spaces, underscores, dots, commas, slashes, question marks, hyphens or equals signs!');
+        return; // 阻止输入
+      }
+    }
+    
+    setFormData(prev => ({ ...prev, [name]: value })); 
+  };
   const handleNestedChange = (parent, name, value) => { 
     setFormData(prev => {
       const currentValue = prev[parent][name];
@@ -443,6 +491,16 @@ function FormPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!window.confirm('请确认填写的信息是否正确，确认无误再提交')) return;
+    
+    // 检查委托单号是否包含特殊字符（如果用户输入了委托单号）
+    if (formData.orderNum && formData.orderNum.trim()) {
+      const specialChars = /[\s_.,\/?\-=]/;
+      if (specialChars.test(formData.orderNum)) {
+        alert('委托单号不能包含空格、下划线、点号、逗号、斜杠、问号、连字符或等号等特殊字符！\nTask number cannot contain special characters like spaces, underscores, dots, commas, slashes, question marks, hyphens or equals signs!');
+        return;
+      }
+    }
+    
     if (!formData.salesPerson) { alert('提交失败！服务方联系人为必填项，请选择业务员'); return; }
     if (!selectedCustomer) { alert('提交失败！请先选择委托方'); return; }
     if (!selectedCustomer.customer_id) {
@@ -687,7 +745,7 @@ function FormPage() {
       const custName = selectedCustomer.customer_name;
       const contactName = selectedCustomer.contact_name;
       const cName = `${orderNum}-${custName}-${contactName}.docx`;
-      const fName = `${orderNum}.docx`;
+      const fName = `${orderNum}_流转单.docx`;
       setCommissionFileName(cName); setFlowFileName(fName);
 
       const flowRes = await generateSampleFlow(flowData);
@@ -707,8 +765,9 @@ function FormPage() {
       setFlowUrl(flowObjUrl);
       setOrderTemplateUrl(orderTemplateObjUrl);
       setProcessTemplateUrl(processTemplateObjUrl);
-      setOrderTemplateFileName(`委托单模板_${orderNum}.docx`);
-      setProcessTemplateFileName(`流转单模板_${orderNum}.docx`);
+      // 前端下载的模板文件名也按新规范
+      setOrderTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
+      setProcessTemplateFileName(`${orderNum}_流转单.docx`);
       setShowDownloadModal(true);
     } catch (error) {
       const msg = error.response?.data?.message || '服务器出现错误，请重试';
@@ -762,9 +821,11 @@ function FormPage() {
 
   return (
     <div>
-      <img src="/JITRI-logo3.png" alt="logo"></img>
-      <button type="button" onClick={() => navigate('/')} className='form-back'>返回首页</button>
-      <h1>检测委托合同<br/>Testing Application Contract</h1>
+      <div className="header-section">
+        <img src="/JITRI-logo3.png" alt="logo"></img>
+        <h1>集萃检测开单系统</h1>
+        <h2>检测委托合同<br/>Testing Application Contract</h2>
+      </div>
       <form onSubmit={handleSubmit}>
         <label htmlFor="orderNum">任务编号 Task number:
           <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="请输入委托单号或留空自动生成" />
@@ -1178,7 +1239,7 @@ function FormPage() {
                           <td>{item.test_item_name}</td>
                           <td>{item.test_condition}</td>
                           <td>{item.test_standard}</td>
-                          <td>{item.unit_price} 元</td>
+                          <td>{item.unit_price}</td>
                           <td><button onClick={() => handlePriceSelect(item)}>选择</button></td>
                         </tr>
                       ))}

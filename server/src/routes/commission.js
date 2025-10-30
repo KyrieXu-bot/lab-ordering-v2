@@ -29,18 +29,39 @@ router.get('/', async (req, res, next) => {
       );
       customer = row || null;
     } else {
-      // 兜底：尝试基于 payer_id 或 customer_id 回填基本客户信息
+      // 兜底：基于 payer_id 或 customer_id 回填，并尽量带出 commissioners 的联系人信息
       if (o.payer_id) {
         const [[row]] = await pool.query(
-          `SELECT c.customer_id, c.customer_name, c.address AS customer_address, NULL as commissioner_id
-           FROM payers p JOIN customers c ON c.customer_id = p.customer_id
-           WHERE p.payer_id = ? LIMIT 1`, [o.payer_id]
+          `SELECT c.customer_id,
+                  c.customer_name,
+                  c.address AS customer_address,
+                  m.commissioner_id,
+                  m.contact_name,
+                  m.contact_phone AS contact_phone_num,
+                  m.email AS contact_email
+           FROM payers p
+           JOIN customers c ON c.customer_id = p.customer_id
+           LEFT JOIN commissioners m ON m.payer_id = p.payer_id
+           WHERE p.payer_id = ?
+           ORDER BY m.commissioner_id DESC
+           LIMIT 1`, [o.payer_id]
         );
         customer = row || null;
       } else if (o.customer_id) {
         const [[row]] = await pool.query(
-          `SELECT customer_id, customer_name, address AS customer_address, NULL as commissioner_id
-           FROM customers WHERE customer_id = ? LIMIT 1`, [o.customer_id]
+          `SELECT c.customer_id,
+                  c.customer_name,
+                  c.address AS customer_address,
+                  m.commissioner_id,
+                  m.contact_name,
+                  m.contact_phone AS contact_phone_num,
+                  m.email AS contact_email
+           FROM customers c
+           LEFT JOIN payers p ON p.customer_id = c.customer_id
+           LEFT JOIN commissioners m ON m.payer_id = p.payer_id
+           WHERE c.customer_id = ?
+           ORDER BY m.commissioner_id DESC
+           LIMIT 1`, [o.customer_id]
         );
         customer = row || null;
       }
@@ -66,6 +87,42 @@ router.get('/', async (req, res, next) => {
        FROM test_items ti WHERE ti.order_id = ? ORDER BY ti.test_item_id`, [orderNum]
     );
 
+    // 如果没有 assignments 记录，尝试从付款方信息中获取业务员
+    let fallbackSalesperson = null;
+    if (items.length > 0 && (!items[0].assignment_accounts || items[0].assignment_accounts.length === 0)) {
+      if (customer && customer.customer_id) {
+        try {
+          // 优先从当前订单的付款方获取业务员，如果没有则从客户的所有付款方中获取
+          let salespersonQuery;
+          let queryParams;
+          
+          if (o.payer_id) {
+            // 如果有具体的付款方ID，优先使用该付款方的业务员
+            salespersonQuery = `SELECT u.user_id, u.account, u.name, u.email, u.phone
+                               FROM payers p
+                               JOIN users u ON u.user_id = p.owner_user_id
+                               WHERE p.payer_id = ? AND u.is_active = 1`;
+            queryParams = [o.payer_id];
+          } else {
+            // 否则从客户的所有付款方中获取第一个有业务员的
+            salespersonQuery = `SELECT u.user_id, u.account, u.name, u.email, u.phone
+                               FROM payers p
+                               JOIN users u ON u.user_id = p.owner_user_id
+                               WHERE p.customer_id = ? AND u.is_active = 1
+                               ORDER BY p.payer_id LIMIT 1`;
+            queryParams = [customer.customer_id];
+          }
+          
+          const [[salesperson]] = await pool.query(salespersonQuery, queryParams);
+          if (salesperson) {
+            fallbackSalesperson = salesperson.account;
+          }
+        } catch (err) {
+          console.warn('Failed to get fallback salesperson:', err.message);
+        }
+      }
+    }
+
     const testItems = items.map(ti => {
       let assignment_accounts = [];
       try {
@@ -78,6 +135,11 @@ router.get('/', async (req, res, next) => {
         }
       } catch (err) {
         assignment_accounts = [];
+      }
+      
+      // 如果 assignment_accounts 为空且有 fallbackSalesperson，使用它
+      if (assignment_accounts.length === 0 && fallbackSalesperson) {
+        assignment_accounts = [fallbackSalesperson];
       }
       
       return {
@@ -94,7 +156,7 @@ router.get('/', async (req, res, next) => {
         price_id: ti.price_id || null,
         test_code: ti.test_code || null,
         test_condition: ti.detail_name || '',
-        price_note: '',
+        price_note: ti.price_note || '',
         group_id: ti.group_id || null,
         assignment_accounts: assignment_accounts,
         arrival_mode: ti.arrival_mode || '',
@@ -185,6 +247,58 @@ router.get('/', async (req, res, next) => {
     // vatType 默认为 '1'（不再从reports表读取）
     const vatType = '1';
 
+    // 5. 获取服务方信息（业务员信息）
+    let serviceInfo = null;
+    
+    // 优先从付款方的owner_user_id获取业务员信息
+    if (payer && payer.payment_id) {
+      try {
+        const [[salesperson]] = await pool.query(
+          `SELECT u.user_id, u.account, u.name, u.email, u.phone
+           FROM payers p
+           JOIN users u ON u.user_id = p.owner_user_id
+           WHERE p.payer_id = ? AND u.is_active = 1 LIMIT 1`,
+          [payer.payment_id]
+        );
+        if (salesperson) {
+          serviceInfo = {
+            account: salesperson.account,
+            name: salesperson.name,
+            email: salesperson.email,
+            phone: salesperson.phone
+          };
+        }
+      } catch (err) {
+        console.warn('Failed to get service info from payer:', err.message);
+      }
+    }
+    
+    // 如果从付款方没有获取到，尝试从assignment_accounts中查找业务员账号
+    if (!serviceInfo && testItems.length > 0 && testItems[0].assignment_accounts && testItems[0].assignment_accounts.length > 0) {
+      // 从assignment_accounts中查找业务员账号（YW开头的账号）
+      const salesAccount = testItems[0].assignment_accounts.find(acc => acc && acc.includes('YW'));
+      if (salesAccount) {
+        try {
+          const [[salesperson]] = await pool.query(
+            `SELECT u.user_id, u.account, u.name, u.email, u.phone
+             FROM users u
+             WHERE u.account = ? AND u.is_active = 1 LIMIT 1`,
+            [salesAccount]
+          );
+          if (salesperson) {
+            serviceInfo = {
+              account: salesperson.account,
+              name: salesperson.name,
+              email: salesperson.email,
+              phone: salesperson.phone
+            };
+          }
+        } catch (err) {
+          console.warn('Failed to get service info from assignments:', err.message);
+        }
+      }
+    }
+
     // 6. 返回给前端（结构与前端预填期望一致）
     res.json({
       customer,
@@ -194,7 +308,8 @@ router.get('/', async (req, res, next) => {
       orderInfo,
       vatType,
       sampleHandling,
-      sampleRequirements
+      sampleRequirements,
+      serviceInfo
     });
   } catch (e) {
     next(e);
@@ -213,7 +328,19 @@ router.post('/', async (req, res, next) => {
     const customerId = payload.customerId;
     const paymentId  = payload.paymentId; // payer_id
     const assignmentAccount = payload.assignmentInfo?.account || null;
-    const commissionerIdFromPayer = null; // 如果使用委托方管理，可扩展
+    const commissionerId = payload.commissionerId || null; // 从前端获取委托方ID
+
+    // 调试：入口与关键顶层参数
+    try {
+      console.log('[commission][POST] incoming payload summary', {
+        customerId,
+        paymentId,
+        commissionerId,
+        hasReportInfo: Boolean(payload.reportInfo),
+        testItemsCount: Array.isArray(payload.testItems) ? payload.testItems.length : 0,
+        assignmentAccount
+      });
+    } catch (_) {}
 
     const reportInfo = payload.reportInfo || {};
     const orderInfo = payload.orderInfo || {};
@@ -257,10 +384,11 @@ router.post('/', async (req, res, next) => {
 
     // 创建订单（created_by 暂用 assignmentAccount 或 'LX001'）
     const created_by = assignmentAccount || 'LX001';
+    try { console.log('[commission][POST] creating order', { order_id, created_by }); } catch (_) {}
     await conn.query(
       `INSERT INTO orders (order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [order_id, customerId, paymentId || null, commissionerIdFromPayer, created_by,
+      [order_id, customerId, paymentId || null, commissionerId, created_by,
        payload?.orderInfo?.is_internal ? 1 : 0,
        payload?.orderInfo?.agreement_note || null,
        payload?.orderInfo?.other_requirements || null]
@@ -323,13 +451,35 @@ router.post('/', async (req, res, next) => {
 
     // 插入 test_items
     for (const item of payload.testItems || []) {
+      try {
+        console.log('[commission][POST] -> test_item incoming', {
+          name: item.test_item,
+          price_id: item.price_id,
+          test_code: item.test_code,
+          department_id: item.department_id,
+          group_id: item.group_id,
+          quantity: item.quantity
+        });
+      } catch (_) {}
       const name = (item.test_item || '').trim();
       const parts = name.split(' - ');
       const category_name = (parts[0] || '').trim();
       const detail_name   = (parts.slice(1).join(' - ') || '').trim(); // 允许名称里含 -
-      const unit_price = item.unit_price != null && String(item.unit_price).trim() !== '' ? Number(item.unit_price) : null;
-      const final_unit_price = unit_price;
-      const line_total = unit_price != null && item.quantity ? (Number(unit_price) * Number(item.quantity)) : null;
+      
+      // unit_price现在是varchar类型，支持带字符的价格（如"800一件"）
+      // 尝试转换为数字用于计算，如果不能转换为数字则保留原字符串
+      let unit_price = item.unit_price != null && String(item.unit_price).trim() !== '' ? item.unit_price : null;
+      let final_unit_price = unit_price;
+      let line_total = null;
+      
+      // 如果unit_price可以转换为数字，则进行计算
+      if (unit_price != null) {
+        const numPrice = Number(unit_price);
+        if (!isNaN(numPrice)) {
+          final_unit_price = numPrice;
+          line_total = numPrice && item.quantity ? (numPrice * Number(item.quantity)) : null;
+        }
+      }
 
       // 获取price表信息用于判断项目类型
       let priceInfo = null;
@@ -341,6 +491,8 @@ router.post('/', async (req, res, next) => {
         );
         priceInfo = priceRows[0] || null;
       }
+
+      try { console.log('[commission][POST] priceInfo', priceInfo); } catch (_) {}
 
       // 判断是否为标准项目
       const isStandardProject = priceInfo && 
@@ -357,13 +509,66 @@ router.post('/', async (req, res, next) => {
         !priceInfo.group_id && 
         priceInfo.department_id;
 
+      try {
+        console.log('[commission][POST] project flags', {
+          isStandardProject: Boolean(isStandardProject),
+          isOutsourcedProject: Boolean(isOutsourcedProject),
+          isOtherCategoryProject: Boolean(isOtherCategoryProject),
+          assignmentAccount
+        });
+      } catch (_) {}
+
+      // 先查找负责人信息，用于设置test_items的supervisor_id
+      let assignedTo = null;
+      let supervisorId = null;
+      let testItemSupervisorId = null; // 用于test_items.supervisor_id字段
+
+      // 根据项目类型进行自动分配
+      if (isStandardProject) {
+        // 标准项目：查找对应group_id的组长（supervisor）
+        const [supervisorRows] = await conn.query(
+          `SELECT user_id, account, name FROM users 
+           WHERE is_active = 1 AND group_id = ? AND group_role = 'supervisor' 
+           ORDER BY user_id LIMIT 1`,
+          [priceInfo.group_id]
+        );
+        
+        if (supervisorRows.length > 0) {
+          assignedTo = supervisorRows[0].account; // assignments.assigned_to = 组长账号
+          supervisorId = supervisorRows[0].account; // assignments.supervisor_id = 组长账号
+          testItemSupervisorId = supervisorRows[0].account; // test_items.supervisor_id = 组长账号
+        }
+        try { console.log('[commission][POST] standard supervisor lookup', { group_id: priceInfo.group_id, found: supervisorRows.length, assignedTo }); } catch (_) {}
+      } else if (isOutsourcedProject) {
+        // 委外项目：查找对应department_id的室主任
+        const [deptLeaderRows] = await conn.query(
+          `SELECT user_id, account, name FROM users 
+           WHERE is_active = 1 AND department_id = ? AND group_role = 'leader' 
+           ORDER BY user_id LIMIT 1`,
+          [priceInfo.department_id]
+        );
+        
+        if (deptLeaderRows.length > 0) {
+          assignedTo = deptLeaderRows[0].account; // assignments.assigned_to = 室主任账号
+          supervisorId = deptLeaderRows[0].account; // assignments.supervisor_id = 室主任账号
+          testItemSupervisorId = deptLeaderRows[0].account; // test_items.supervisor_id = 室主任账号
+        }
+        try { console.log('[commission][POST] outsourced leader lookup', { department_id: priceInfo.department_id, found: deptLeaderRows.length, assignedTo }); } catch (_) {}
+      } else if (assignmentAccount) {
+        // 兜底：使用业务员作为负责人
+        assignedTo = assignmentAccount; // assignments.assigned_to = 业务员
+        supervisorId = null; // 没有上级监督
+        try { console.log('[commission][POST] fallback assignedTo from assignmentAccount', { assignedTo }); } catch (_) {}
+      }
+
+      // 插入test_items（包含supervisor_id）
       const [r] = await conn.query(
         `INSERT INTO test_items
          (order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-          sample_name, material, sample_type, original_no, sample_preparation, note,
-          arrival_mode, sample_arrival_status, status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          sample_name, material, sample_type, original_no, sample_preparation, note, price_note,
+          arrival_mode, sample_arrival_status, status, supervisor_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           order_id,
           item.price_id || null,
@@ -387,6 +592,7 @@ router.post('/', async (req, res, next) => {
           item.original_no || null,
           item.sample_preparation || null,
           item.note || null,
+          item.price_note || null,
           (item.arrival_mode === 'mail'
             ? 'delivery'
             : (item.arrival_mode || (payload?.arrivalInfo?.arrivalMethod === 'mail'
@@ -395,68 +601,81 @@ router.post('/', async (req, res, next) => {
           (item.sample_arrival_status === 'arrived' || item.sample_arrival_status === 'not_arrived')
             ? item.sample_arrival_status
             : (payload?.arrivalInfo?.sampleArrived === 'yes' ? 'arrived' : 'not_arrived'),
-          'new' // 初始状态为new
+          'new', // 初始状态为new
+          testItemSupervisorId // 负责人ID
         ]
       );
       const test_item_id = r.insertId;
 
-      let assignedTo = null;
-      let supervisorId = null;
-
-      // 根据项目类型进行自动分配
-      if (isStandardProject) {
-        // 标准项目：分配到对应group_id的组长
-        const [leaderRows] = await conn.query(
-          `SELECT user_id, account, name FROM users 
-           WHERE is_active = 1 AND group_id = ? AND group_role = 'leader' 
-           ORDER BY user_id LIMIT 1`,
-          [priceInfo.group_id]
-        );
-        
-        if (leaderRows.length > 0) {
-          assignedTo = leaderRows[0].user_id;
-          supervisorId = leaderRows[0].user_id; // 组长自己监督自己
-        }
-      } else if (isOutsourcedProject) {
-        // 委外项目：分配到对应department_id的室主任
-        const [deptLeaderRows] = await conn.query(
-          `SELECT user_id, account, name FROM users 
-           WHERE is_active = 1 AND department_id = ? AND group_role = 'leader' 
-           ORDER BY user_id LIMIT 1`,
-          [priceInfo.department_id]
-        );
-        
-        if (deptLeaderRows.length > 0) {
-          assignedTo = deptLeaderRows[0].user_id;
-          supervisorId = deptLeaderRows[0].user_id; // 室主任自己监督自己
-        }
-      } else if (assignmentAccount) {
-        // 兜底：使用原来的分配逻辑
-        assignedTo = assignmentAccount;
-      }
+      try { console.log('[commission][POST] inserted test_item', { test_item_id, order_id, supervisor_id: testItemSupervisorId }); } catch (_) {}
 
       // 创建分配记录
-      if (assignedTo) {
+      // assignments表的created_by固定为开单员KD001
+      const assignmentCreator = 'KD001';
+      
+      if (isStandardProject && assignedTo && assignmentAccount) {
+        // 标准项目：插入两条记录 - 业务员和组长
+        // 1. 插入业务员记录（is_active=0，用于预填功能）
+        await conn.query(
+          `INSERT INTO assignments (test_item_id, assigned_to, supervisor_id, is_active, note, created_by)
+           VALUES (?, ?, ?, 0, '业务员', ?)`,
+          [test_item_id, assignmentAccount, assignedTo, assignmentCreator]
+        );
+        try { console.log('[commission][POST] inserted salesperson assignment', { test_item_id, assignedTo: assignmentAccount, supervisorId: assignedTo, created_by: assignmentCreator }); } catch (_) {}
+        
+        // 2. 插入组长记录（is_active=1，作为当前激活的分配）
+        await conn.query(
+          `INSERT INTO assignments (test_item_id, assigned_to, supervisor_id, is_active, note, created_by)
+           VALUES (?, ?, ?, 1, '组长', ?)`,
+          [test_item_id, assignedTo, assignedTo, assignmentCreator]
+        );
+        try { console.log('[commission][POST] inserted supervisor assignment', { test_item_id, assignedTo, supervisorId: assignedTo, created_by: assignmentCreator }); } catch (_) {}
+      } else if (assignedTo) {
+        // 非标准项目：只插入一条记录
         await conn.query(
           `INSERT INTO assignments (test_item_id, assigned_to, supervisor_id, is_active, note, created_by)
            VALUES (?, ?, ?, 1, NULL, ?)`,
-          [test_item_id, assignedTo, supervisorId, created_by]
+          [test_item_id, assignedTo, supervisorId, assignmentCreator]
         );
-        
-        // 更新test_items状态和当前执行人
-        const status = assignedTo ? 'assigned' : 'new';
+        try { console.log('[commission][POST] inserted assignment', { test_item_id, assignedTo, supervisorId, created_by: assignmentCreator }); } catch (_) {}
+      }
+      
+      // 更新test_items状态和当前执行人（始终使用业务员作为current_assignee）
+      if (isStandardProject && assignedTo && assignmentAccount) {
+        // 标准项目：使用业务员作为current_assignee
+        const currentAssignee = assignmentAccount;
         await conn.query(
           `UPDATE test_items SET current_assignee = ?, status = ? WHERE test_item_id = ?`, 
-          [assignedTo, status, test_item_id]
+          [currentAssignee, 'assigned', test_item_id]
         );
+        try { console.log('[commission][POST] updated test_item assignee (standard)', { test_item_id, current_assignee: currentAssignee, status: 'assigned', assignmentAccount, assignedTo }); } catch (_) {}
+      } else if (assignedTo) {
+        // 非标准项目：使用负责人作为current_assignee
+        const currentAssignee = assignmentAccount || assignedTo;
+        await conn.query(
+          `UPDATE test_items SET current_assignee = ?, status = ? WHERE test_item_id = ?`, 
+          [currentAssignee, 'assigned', test_item_id]
+        );
+        try { console.log('[commission][POST] updated test_item assignee (non-standard)', { test_item_id, current_assignee: currentAssignee, status: 'assigned', assignmentAccount, assignedTo }); } catch (_) {}
+      } else {
+        try {
+          console.log('[commission][POST] no assignee decided', {
+            test_item_id,
+            reason: 'no standard/outsourced leader found and no assignmentAccount',
+            flags: { isStandardProject: Boolean(isStandardProject), isOutsourcedProject: Boolean(isOutsourcedProject) },
+            assignmentAccount
+          });
+        } catch (_) {}
       }
     }
 
     await conn.commit();
+    try { console.log('[commission][POST] committed', { order_id }); } catch (_) {}
     res.status(201).json({ orderNum: order_id });
   } catch (e) {
     await (conn.rollback().catch(()=>{}));
     const status = e.status || 500;
+    try { console.error('[commission][POST] error', { message: e.message, status }); } catch (_) {}
     res.status(status).json({ message: e.message || 'error' });
   } finally {
     conn.release();
