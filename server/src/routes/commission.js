@@ -20,7 +20,7 @@ router.get('/', async (req, res, next) => {
     let customer = null, payer = null;
     if (o.commissioner_id) {
       const [[row]] = await pool.query(
-        `SELECT m.commissioner_id, c.customer_id, c.customer_name, c.address AS customer_address,
+        `SELECT m.commissioner_id, c.customer_id, m.commissioner_name AS customer_name, m.address AS customer_address,
                 m.contact_name, m.contact_phone AS contact_phone_num, m.email AS contact_email
          FROM commissioners m
          JOIN payers p ON p.payer_id = m.payer_id
@@ -33,8 +33,8 @@ router.get('/', async (req, res, next) => {
       if (o.payer_id) {
         const [[row]] = await pool.query(
           `SELECT c.customer_id,
-                  c.customer_name,
-                  c.address AS customer_address,
+                  COALESCE(m.commissioner_name, c.customer_name) AS customer_name,
+                  COALESCE(m.address, c.address) AS customer_address,
                   m.commissioner_id,
                   m.contact_name,
                   m.contact_phone AS contact_phone_num,
@@ -50,8 +50,8 @@ router.get('/', async (req, res, next) => {
       } else if (o.customer_id) {
         const [[row]] = await pool.query(
           `SELECT c.customer_id,
-                  c.customer_name,
-                  c.address AS customer_address,
+                  COALESCE(m.commissioner_name, c.customer_name) AS customer_name,
+                  COALESCE(m.address, c.address) AS customer_address,
                   m.commissioner_id,
                   m.contact_name,
                   m.contact_phone AS contact_phone_num,

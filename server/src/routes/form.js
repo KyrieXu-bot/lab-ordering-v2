@@ -9,8 +9,8 @@ router.get('/customers', async (req, res, next) => {
     const [rows] = await pool.query(
       `SELECT m.commissioner_id,
               c.customer_id,
-              c.customer_name,
-              c.address AS customer_address,
+              m.commissioner_name AS customer_name,
+              m.address AS customer_address,
               m.contact_name,
               m.contact_phone AS contact_phone_num,
               m.email AS contact_email
@@ -18,7 +18,7 @@ router.get('/customers', async (req, res, next) => {
        JOIN payers p ON p.payer_id = m.payer_id
        JOIN customers c ON c.customer_id = p.customer_id
        WHERE c.is_active = 1 AND m.is_active = 1
-         AND (c.customer_name LIKE ?)
+         AND (m.commissioner_name LIKE ?)
          AND (m.contact_name LIKE ? OR ? = '')
          AND (m.contact_phone LIKE ? OR ? = '')
        ORDER BY m.commissioner_id DESC

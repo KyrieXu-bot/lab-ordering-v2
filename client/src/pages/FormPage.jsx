@@ -745,7 +745,7 @@ function FormPage() {
       const custName = selectedCustomer.customer_name;
       const contactName = selectedCustomer.contact_name;
       const cName = `${orderNum}-${custName}-${contactName}.docx`;
-      const fName = `${orderNum}_流转单.docx`;
+      const fName = `${orderNum}.docx`;
       setCommissionFileName(cName); setFlowFileName(fName);
 
       const flowRes = await generateSampleFlow(flowData);
@@ -767,7 +767,7 @@ function FormPage() {
       setProcessTemplateUrl(processTemplateObjUrl);
       // 前端下载的模板文件名也按新规范
       setOrderTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
-      setProcessTemplateFileName(`${orderNum}_流转单.docx`);
+      setProcessTemplateFileName(`${orderNum}.docx`);
       setShowDownloadModal(true);
     } catch (error) {
       const msg = error.response?.data?.message || '服务器出现错误，请重试';
