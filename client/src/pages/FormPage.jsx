@@ -61,13 +61,19 @@ function FormPage() {
     { department_id: 1, department_name: '显微组织表征实验室' },
     { department_id: 2, department_name: '物化性能测试实验室' },
     { department_id: 3, department_name: '力学性能测试实验室' },
-    { department_id: 4, department_name: '委外' }
+    { department_id: 5, department_name: '委外' }
   ];
   const navigate = useNavigate();
 
   const arrivalMethodOptions = [
     { key: 'on_site', label: '现场到达' },
     { key: 'mail',   label: '寄样' },
+  ];
+
+  const serviceUrgencyOptions = [
+    { value: 'normal', label: '正常' },
+    { value: 'urgent_1_5x', label: '加急1.5倍' },
+    { value: 'urgent_2x', label: '特急2倍' },
   ];
 
   // 初始化表单数据
@@ -83,8 +89,6 @@ function FormPage() {
       contactPhoneNum: '',
       contactEmail: ''
     },
-    serviceType: '',
-    sampleSolutionType: '',
     sampleReturnInfo: {
       returnAddressOption: '',
       returnAddress: ''
@@ -148,6 +152,8 @@ function FormPage() {
     unit_price: p.unit_price,
     department_id: p.department_id,
     group_id: p.group_id,
+    discount_rate: '',
+    service_urgency: 'normal'
   });
 
   const formatTestItemDisplay = (ti = {}) => {
@@ -298,12 +304,10 @@ function FormPage() {
         reportHeader: String(data.reportInfo?.header_type || ''),
         reportHeaderAdditionalInfo: data.reportInfo?.header_other || '',
         reportForm: String(data.reportInfo?.format_type || ''),
-        serviceType: String(data.orderInfo?.service_type || ''),
-        reportSeals: seals,
-        deliveryDays: data.orderInfo?.delivery_days_after_receipt || '',
-        otherRequirements: data.orderInfo?.other_requirements || '',
+        deliveryDays: data.orderInfo?.delivery_days_after_receipt != null ? String(data.orderInfo.delivery_days_after_receipt) : '',
         sampleSolutionType: String(data.sampleHandling?.handling_type || ''),
         sampleReturnInfo: data.sampleHandling?.return_info || { returnAddressOption: '', returnAddress: '' },
+        sampleShippingAddress: (data.sampleHandling?.return_info?.returnAddressOption === 'other' && data.sampleHandling?.return_info?.returnAddress) ? data.sampleHandling.return_info.returnAddress : '',
         sampleRequirements: data.sampleRequirements || { hazards: [], hazardOther:'', magnetism:'', conductivity:'', breakable:'', brittle:'' },
         testItems: (data.testItems || []).map(it => ({
           ...it,
@@ -312,7 +316,9 @@ function FormPage() {
           sampleType: it.sample_type != null ? it.sample_type : (it.sampleType || ''),
           // 其它已使用的键保持不变
           arrival_mode: it.arrival_mode || '',
-          sample_arrival_status: it.sample_arrival_status || 'arrived'
+          sample_arrival_status: it.sample_arrival_status || 'arrived',
+          discount_rate: it.discount_rate || '',
+          service_urgency: it.service_urgency || 'normal'
         }))
       }));
       alert('预填成功！');
@@ -327,7 +333,7 @@ function FormPage() {
   const addTestItem = () => {
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
-      test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: ''
+      test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal'
     }]}));
   };
 
@@ -357,6 +363,9 @@ function FormPage() {
       const oldRow = items[idx] || {};
       const pf = createTestItemFromPrice(item);
       items[idx] = { ...oldRow, ...pf };
+      if (oldRow.service_urgency) {
+        items[idx].service_urgency = oldRow.service_urgency;
+      }
       return { ...prev, testItems: items };
     });
     setShowPriceModal(false);
@@ -368,6 +377,9 @@ function FormPage() {
       const oldRow = items[index] || {};
       const pf = createTestItemFromPrice(priceItem);
       items[index] = { ...oldRow, ...pf };
+      if (oldRow.service_urgency) {
+        items[index].service_urgency = oldRow.service_urgency;
+      }
       return { ...prev, testItems: items };
     });
   };
@@ -503,13 +515,11 @@ function FormPage() {
     
     if (!formData.salesPerson) { alert('提交失败！服务方联系人为必填项，请选择业务员'); return; }
     if (!selectedCustomer) { alert('提交失败！请先选择委托方'); return; }
-    if (!selectedCustomer.customer_id) {
-      alert('提交失败！未选择客户库中的委托方，请选择后重试。');
+    if (!selectedCustomer.commissioner_id) {
+      alert('提交失败！未选择有效的委托方，请选择后重试。');
       return;
     }
     if (!selectedPayer) { alert('提交失败！请先选择付款方'); return; }
-    if (!formData.serviceType) { alert('提交失败！周期类型为必填项，请重新选择'); return; }
-    if (formData.reportType.length === 0) { alert('提交失败！报告文档为必填项，请重新选择'); return; }
     if (formData.testItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
 
     for (let i = 0; i < formData.testItems.length; i++) {
@@ -519,7 +529,6 @@ function FormPage() {
       if (!ti.sampleType) { alert(`提交失败！第${i + 1}行：样品状态为必填项`); return; }
       if (!ti.test_item) { alert(`提交失败！第${i + 1}行：检测项目为必填项`); return; }
       if (!ti.test_method) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
-      if (ti.sample_preparation === '') { alert(`提交失败！第${i + 1}行：制样为必填项`); return; }
       if (!ti.quantity) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
       if (!ti.department_id) { alert(`提交失败！第${i + 1}行：部门为必填项`); return; }
     }
@@ -531,17 +540,30 @@ function FormPage() {
     if (!req.breakable) { alert('提交失败！是否可破坏为必填项，请选择'); return; }
     if (!req.brittle) { alert('提交失败！是否孤品为必填项，请选择'); return; }
 
-    if (!formData.sampleSolutionType) { alert('提交失败！余样处置为必填项，请重新选择'); return; }
-    if (formData.sampleSolutionType === '3' && formData.sampleReturnInfo.returnAddressOption === 'other' && !formData.sampleShippingAddress) {
-      alert('提交失败！退回地址为必填项'); return;
+    if (formData.sampleSolutionType === '3') {
+      if (!formData.sampleReturnInfo.returnAddressOption) {
+        alert('提交失败！退回地址为必填项');
+        return;
+      }
+      if (formData.sampleReturnInfo.returnAddressOption === 'other' && !(formData.sampleShippingAddress || '').trim()) {
+        alert('提交失败！退回地址为必填项');
+        return;
+      }
     }
+
+    const serviceUrgencyValues = formData.testItems.length
+      ? formData.testItems.map(item => item.service_urgency || 'normal')
+      : ['normal'];
+    const uniqueServiceUrgency = Array.from(new Set(serviceUrgencyValues));
+    const aggregatedServiceUrgency = uniqueServiceUrgency.length === 1 ? uniqueServiceUrgency[0] : 'normal';
+    const serviceUrgencyToCode = { normal: '1', urgent_1_5x: '2', urgent_2x: '3' };
+    const orderServiceTypeCode = serviceUrgencyToCode[aggregatedServiceUrgency] || '1';
 
     const commissionData = {
       customerId: selectedCustomer.customer_id,
       paymentId: selectedPayer.payment_id,
       commissionerId: selectedCustomer.commissioner_id,
       orderInfo: {
-        service_type: formData.serviceType,
         sample_shipping_address: formData.sampleSolutionType === '3' && formData.sampleReturnInfo.returnAddressOption === 'other' ? formData.sampleShippingAddress : null,
         total_price: formData.totalPrice || null,
         order_num: formData.orderNum || null,
@@ -559,7 +581,13 @@ function FormPage() {
         header_other: formData.reportHeader === '2' ? formData.reportHeaderAdditionalInfo : null,
         format_type: formData.reportForm || null
       },
-      sampleHandling: { handling_type: formData.sampleSolutionType, return_info: formData.sampleSolutionType === '3' ? formData.sampleReturnInfo : null },
+      sampleHandling: { 
+        handling_type: formData.sampleSolutionType, 
+        return_info: formData.sampleSolutionType === '3' ? {
+          ...formData.sampleReturnInfo,
+          returnAddress: formData.sampleReturnInfo.returnAddressOption === 'other' ? formData.sampleShippingAddress : (formData.sampleReturnInfo.returnAddress || '')
+        } : null 
+      },
       sampleRequirements: formData.sampleRequirements,
       testItems: formData.testItems.map(item => ({
         sample_name: item.sampleName, material: item.material || '',
@@ -567,8 +595,10 @@ function FormPage() {
         original_no: item.original_no || '', test_item: item.test_item, test_method: item.test_method,
         sample_preparation: item.sample_preparation, quantity: item.quantity, department_id: item.department_id, note: item.note || '',
         price_id: item.price_id, test_code: item.test_code, test_condition: item.test_condition, price_note: item.price_note, group_id: item.group_id,
+        discount_rate: item.discount_rate || null,
         arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode,
-        sample_arrival_status: item.sample_arrival_status || 'arrived'
+        sample_arrival_status: item.sample_arrival_status || 'arrived',
+        service_urgency: item.service_urgency || 'normal'
       })),
       assignmentInfo: { account: formData.salesPerson }
     };
@@ -578,9 +608,9 @@ function FormPage() {
       alert(`表单提交成功！委托单号为: ${response.data.orderNum}`);
       const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
       const templateData = {
-        serviceType1Symbol: commissionData.orderInfo.service_type === '1' ? '☑' : '☐',
-        serviceType2Symbol: commissionData.orderInfo.service_type === '2' ? '☑' : '☐',
-        serviceType3Symbol: commissionData.orderInfo.service_type === '3' ? '☑' : '☐',
+        serviceType1Symbol: orderServiceTypeCode === '1' ? '☑' : '☐',
+        serviceType2Symbol: orderServiceTypeCode === '2' ? '☑' : '☐',
+        serviceType3Symbol: orderServiceTypeCode === '3' ? '☑' : '☐',
         reportSeals1Symbol: commissionData.orderInfo.report_seals.includes('normal') ? '☑' : '☐',
         reportSeals2Symbol: commissionData.orderInfo.report_seals.includes('cnas') ? '☑' : '☐',
         reportSeals3Symbol: commissionData.orderInfo.report_seals.includes('cma') ? '☑' : '☐',
@@ -712,9 +742,9 @@ function FormPage() {
         headerType1Symbol: commissionData.reportInfo.header_type === '1' ? '☑' : '☐',
         headerType2Symbol: commissionData.reportInfo.header_type === '2' ? '☑' : '☐',
         header_additional_info: (commissionData.reportInfo.header_other || ''),
-        serviceType1Symbol: commissionData.orderInfo.service_type === '1' ? '☑' : '☐',
-        serviceType2Symbol: commissionData.orderInfo.service_type === '2' ? '☑' : '☐',
-        serviceType3Symbol: commissionData.orderInfo.service_type === '3' ? '☑' : '☐',
+        serviceType1Symbol: orderServiceTypeCode === '1' ? '☑' : '☐',
+        serviceType2Symbol: orderServiceTypeCode === '2' ? '☑' : '☐',
+        serviceType3Symbol: orderServiceTypeCode === '3' ? '☑' : '☐',
         delivery_days_after_receipt: commissionData.orderInfo.delivery_days_after_receipt,
         returnNoSymbol: commissionData.sampleHandling.handling_type === '1' ? '☑' : '☐',
         returnPickupSymbol: commissionData.sampleHandling.handling_type === '2' ? '☑' : '☐',
@@ -778,9 +808,9 @@ function FormPage() {
   const handleCustomerSelect = (customer) => {
     setSelectedCustomer(customer);
     
-    // 根据客户ID获取对应的业务员信息
-    if (customer.customer_id) {
-      getSalespersonByCustomer(customer.customer_id)
+    // 根据委托方ID获取对应的业务员信息
+    if (customer.commissioner_id) {
+      getSalespersonByCustomer(customer.commissioner_id)
         .then(response => {
           const salesperson = response.data;
           console.log('业务员信息:', salesperson);
@@ -880,11 +910,8 @@ function FormPage() {
         <fieldset><legend>检测要求 Period Type</legend><label>以【检测要求附录】中信息为准 Subject to the Testing Requirements Appendix</label></fieldset>
 
         <fieldset>
-          <legend>周期类型 Period Type&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-          <label><input type="radio" name="serviceType" value="1" onClick={() => handleRadioClick('serviceType', '1')} checked={formData.serviceType === '1'} readOnly /> 正常 Standard</label>
-          <label><input type="radio" name="serviceType" value="2" onClick={() => handleRadioClick('serviceType', '2')} checked={formData.serviceType === '2'} readOnly /> 加急 Urgent（加收50%检测费用）</label>
-          <label><input type="radio" name="serviceType" value="3" onClick={() => handleRadioClick('serviceType', '3')} checked={formData.serviceType === '3'} readOnly /> 特急（加收100%检测费用）</label>
-          <label style={{ display: 'block', marginTop: 8 }}>交付时间 Delivery time：收样后
+          <legend>交付时间 Delivery Time</legend>
+          <label style={{ display: 'block', marginTop: 8 }}>收样后
             <input type="number" name="deliveryDays" min="0" value={formData.deliveryDays} onChange={handleInputChange} style={{ width: '4em', margin: '0 4px' }} /> 个工作日
           </label>
           <label>注：周六、周日及节假日不计入工作日Saturday, Sunday and festival days are not workdays</label>
@@ -964,13 +991,14 @@ function FormPage() {
                 <th>样品状态<span style={{ color: 'red' }}>*</span><br/>Sample Status</th>
                 <th>样品原号<br/>Sample No.</th>
                 <th>价格备注<br/>Price Note</th>
+                <th>折扣<br/>Discount(%)</th>
                 <th>检测项目<span style={{ color: 'red' }}>*</span><br/>Test Items</th>
                 <th>检测标准<span style={{ color: 'red' }}>*</span><br/>Methods</th>
                 <th>到达方式<br/>Arrival</th>
                 <th>是否到达<br/>Arrived</th>
-                <th>制样<span style={{ color: 'red' }}>*</span><br/>Sample preparation</th>
+                <th>服务加急<br/>Urgency</th>
+                <th>制样<br/>Sample preparation</th>
                 <th>数量<span style={{ color: 'red' }}>*</span><br/>Qty</th>
-                <th>时长(/天)</th>
                 <th>所属部门<span style={{ color: 'red' }}>*</span></th>
                 <th>备注<br/>Remarks</th>
                 <th className="action-col">操作</th>
@@ -996,7 +1024,41 @@ function FormPage() {
                     )}
                   </td>
                   <td><input type="text" value={item.original_no} onChange={(e) => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
-                  <td><input type="text" value={item.price_note || ''} onChange={e => handleTestItemChange(index, 'price_note', e.target.value)} placeholder="可选" /></td>
+                  <td>
+                    <input 
+                      type="text" 
+                      value={item.price_note || ''} 
+                      onChange={e => {
+                        const val = e.target.value;
+                        // 允许空值或纯数字（包括小数）
+                        if (val === '' || /^\d*\.?\d*$/.test(val)) {
+                          handleTestItemChange(index, 'price_note', val);
+                        } else {
+                          alert('价格备注只能输入纯数字！');
+                        }
+                      }} 
+                      placeholder="可选"
+                    />
+                  </td>
+                  <td>
+                    <input 
+                      type="number" 
+                      min="0" 
+                      max="100" 
+                      step="0.01"
+                      value={item.discount_rate || ''} 
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (val === '' || (Number(val) >= 0 && Number(val) <= 100)) {
+                          handleTestItemChange(index, 'discount_rate', val);
+                        } else if (Number(val) > 100) {
+                          alert('折扣率不能超过100%');
+                        }
+                      }} 
+                      placeholder="0-100"
+                      style={{ width: 70 + 'px' }}
+                    />
+                  </td>
                   <td>
                     <input
                       type="text"
@@ -1043,14 +1105,20 @@ function FormPage() {
                     </label>
                   </td>
                   <td>
-                    <select value={item.sample_preparation} onChange={e => handleTestItemChange(index, 'sample_preparation', e.target.value === '' ? '' : Number(e.target.value))}>
-                      <option value="" disabled>--请选择--</option>
+                    <select value={item.service_urgency || 'normal'} onChange={e => handleTestItemChange(index, 'service_urgency', e.target.value)}>
+                      {serviceUrgencyOptions.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={item.sample_preparation != null ? String(item.sample_preparation) : ''} onChange={e => handleTestItemChange(index, 'sample_preparation', e.target.value === '' ? '' : Number(e.target.value))}>
+                      <option value="">--请选择--</option>
                       <option value="1">是 Yes</option>
                       <option value="0">否 No</option>
                     </select>
                   </td>
                   <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
-                  <td><input type="number" min="0" style={{ width: 50 + 'px' }} value={item.deadline} onChange={(e) => handleTestItemChange(index, 'deadline', e.target.value)} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => dept.department_id === item.department_id)?.department_name || '未知部门'}</span></td>
                     : <td><select value={item.department_id || ""} onChange={e => handleDepartmentChange(index, e.target.value)}>
@@ -1260,8 +1328,8 @@ function FormPage() {
                   <thead><tr><th className='title-id'>ID</th><th>付款方名称</th><th>联系人/导师</th><th>联系人电话</th></tr></thead>
                   <tbody>
                     {prefillPayers.map(payer => (
-                      <tr key={payer.payment_id}>
-                        <td className='title-id'>{payer.payment_id}</td>
+                      <tr key={payer.payer_id || payer.payment_id}>
+                        <td className='title-id'>{payer.payer_id || payer.payment_id}</td>
                         <td>{payer.payer_name}</td>
                         <td>{payer.payer_contact_name}</td>
                         <td>{payer.payer_contact_phone_num}</td>

@@ -2,22 +2,22 @@ const express = require('express');
 const pool  = require('../db');
 const router = express.Router();
 
-// 委托方选择列表：commissioners + customers
+// 委托方选择列表：只查询 commissioners 表
 router.get('/customers', async (req, res, next) => {
   try {
     const { customerNameTerm = '', contactNameTerm = '', contactPhoneTerm = '' } = req.query;
     const [rows] = await pool.query(
       `SELECT m.commissioner_id,
-              c.customer_id,
               m.commissioner_name AS customer_name,
               m.address AS customer_address,
               m.contact_name,
               m.contact_phone AS contact_phone_num,
-              m.email AS contact_email
+              m.email AS contact_email,
+              p.customer_id,
+              p.payer_id
        FROM commissioners m
        JOIN payers p ON p.payer_id = m.payer_id
-       JOIN customers c ON c.customer_id = p.customer_id
-       WHERE c.is_active = 1 AND m.is_active = 1
+       WHERE m.is_active = 1 AND p.is_active = 1
          AND (m.commissioner_name LIKE ?)
          AND (m.contact_name LIKE ? OR ? = '')
          AND (m.contact_phone LIKE ? OR ? = '')
@@ -56,23 +56,27 @@ router.get('/payers', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// 选择委托方后，预填付款方（同客户）
+// 选择委托方后，预填付款方（通过 commissioner_id 查询对应的付款方）
 router.get('/prefill-payers', async (req, res, next) => {
   try {
-    const { customer_id } = req.query;
-    if (!customer_id) return res.json([]);
+    const { commissioner_id } = req.query;
+    if (!commissioner_id) return res.json([]);
+    // 一个 commissioner_id 只对应一个 payer_id，所以查询应该只返回一条记录
     const [rows] = await pool.query(
-      `SELECT p.payer_id AS payment_id,
+      `SELECT p.payer_id,
+              p.payer_id AS payment_id,
               c.customer_id,
               c.customer_name AS payer_name,
               c.address AS payer_address,
               p.contact_name AS payer_contact_name,
               p.contact_phone AS payer_contact_phone_num,
+              c.phone AS payer_phone_num,
               c.bank_name, c.tax_id AS tax_number, c.bank_account
-       FROM payers p
+       FROM commissioners m
+       JOIN payers p ON p.payer_id = m.payer_id
        JOIN customers c ON c.customer_id = p.customer_id
-       WHERE p.is_active = 1 AND c.is_active = 1 AND p.customer_id = ?
-       ORDER BY p.payer_id DESC`, [customer_id]
+       WHERE m.is_active = 1 AND p.is_active = 1 AND c.is_active = 1 AND m.commissioner_id = ?
+       LIMIT 1`, [commissioner_id]
     );
     res.json(rows);
   } catch (e) { next(e); }

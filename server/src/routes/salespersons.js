@@ -73,35 +73,25 @@ router.get('/department-leaders', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// 根据客户ID获取对应的业务员信息
+// 根据委托方ID获取对应的业务员信息（通过 commissioner_id 查询对应的付款方的业务员）
 router.get('/by-customer', async (req, res, next) => {
   try {
-    const { customer_id, payer_id } = req.query;
-    if (!customer_id) return res.status(400).json({ message: 'customer_id required' });
+    const { commissioner_id } = req.query;
+    if (!commissioner_id) return res.status(400).json({ message: 'commissioner_id required' });
     
-    let query, params;
-    
-    if (payer_id) {
-      // 如果指定了付款方ID，优先使用该付款方的业务员
-      query = `SELECT u.user_id, u.account, u.name, u.email, u.phone
-               FROM payers p
-               JOIN users u ON u.user_id = p.owner_user_id
-               WHERE p.payer_id = ? AND u.is_active = 1`;
-      params = [payer_id];
-    } else {
-      // 否则从客户的所有付款方中获取第一个有业务员的
-      query = `SELECT u.user_id, u.account, u.name, u.email, u.phone
-               FROM payers p
-               JOIN users u ON u.user_id = p.owner_user_id
-               WHERE p.customer_id = ? AND u.is_active = 1
-               ORDER BY p.payer_id LIMIT 1`;
-      params = [customer_id];
-    }
-    
-    const [[row]] = await pool.query(query, params);
+    // 通过 commissioner_id 查询对应的付款方的业务员
+    const [[row]] = await pool.query(
+      `SELECT u.user_id, u.account, u.name, u.email, u.phone
+       FROM commissioners m
+       JOIN payers p ON p.payer_id = m.payer_id
+       JOIN users u ON u.user_id = p.owner_user_id
+       WHERE m.commissioner_id = ? AND m.is_active = 1 AND p.is_active = 1 AND u.is_active = 1
+       LIMIT 1`,
+      [commissioner_id]
+    );
     
     if (!row) {
-      return res.status(404).json({ message: 'No salesperson found for this customer' });
+      return res.status(404).json({ message: 'No salesperson found for this commissioner' });
     }
     
     res.json({

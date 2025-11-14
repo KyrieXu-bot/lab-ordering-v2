@@ -200,21 +200,26 @@ button:hover {
     min-width: 30px;
 }
 
-/* 加宽"检测项目"列（第 6 列）*/
+/* 设置"折扣"列的宽度（第 7 列）*/
 .test-item-table th:nth-child(7),
 .test-item-table td:nth-child(7) {
+    width: 90px;
+    min-width: 90px;
+}
+
+/* 加宽"检测项目"列（第 8 列）*/
+.test-item-table th:nth-child(8),
+.test-item-table td:nth-child(8) {
     width: 400px;
     min-width: 400px;
     /* 视具体数字再调 */
 }
 
-
-/* 6）稍微加宽“数量”列（第 9 列）*/
-.test-item-table th:nth-child(10),
-.test-item-table td:nth-child(10) {
-    width: 60px;
-    min-width: 60px;
-    /* 视具体数字再调 */
+/* 服务加急列（第 12 列）*/
+.test-item-table th:nth-child(12),
+.test-item-table td:nth-child(12) {
+    width: 120px;
+    min-width: 120px;
 }
 
 /* 保持和表格同样的 max-width，居中显示 */
