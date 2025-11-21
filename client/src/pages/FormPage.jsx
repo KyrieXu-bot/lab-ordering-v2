@@ -520,6 +520,7 @@ function FormPage() {
       return;
     }
     if (!selectedPayer) { alert('提交失败！请先选择付款方'); return; }
+    if (formData.reportType.length === 0) { alert('提交失败！报告文档为必填项，请至少选择一项'); return; }
     if (formData.testItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
 
     for (let i = 0; i < formData.testItems.length; i++) {
