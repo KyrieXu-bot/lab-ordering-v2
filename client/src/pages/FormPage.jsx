@@ -333,7 +333,8 @@ function FormPage() {
   const addTestItem = () => {
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
-      test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal'
+      test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
+      arrival_mode: '', sample_arrival_status: ''
     }]}));
   };
 
@@ -532,6 +533,8 @@ function FormPage() {
       if (!ti.test_method) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
       if (!ti.quantity) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
       if (!ti.department_id) { alert(`提交失败！第${i + 1}行：部门为必填项`); return; }
+      if (!ti.arrival_mode) { alert(`提交失败！第${i + 1}行：到达方式为必填项`); return; }
+      if (!ti.sample_arrival_status) { alert(`提交失败！第${i + 1}行：是否到达为必填项`); return; }
     }
 
     const req = formData.sampleRequirements;
@@ -1090,7 +1093,7 @@ function FormPage() {
                       <input
                         type="radio"
                         name={`sample_arrived_${index}`}
-                        checked={(item.sample_arrival_status || 'arrived') === 'arrived'}
+                        checked={item.sample_arrival_status === 'arrived'}
                         onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'arrived')}
                         readOnly
                       /> 是
@@ -1099,7 +1102,7 @@ function FormPage() {
                       <input
                         type="radio"
                         name={`sample_arrived_${index}`}
-                        checked={(item.sample_arrival_status || 'arrived') === 'not_arrived'}
+                        checked={item.sample_arrival_status === 'not_arrived'}
                         onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'not_arrived')}
                         readOnly
                       /> 否
