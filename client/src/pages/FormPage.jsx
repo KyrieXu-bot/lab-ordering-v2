@@ -12,7 +12,9 @@ import {
   getSalespersonByCustomer,
   generateSampleFlow,
   generateOrderTemplate,
-  generateProcessTemplate
+  generateProcessTemplate,
+  searchOrders,
+  checkOrder
 } from '../api/api';
 import { useNavigate } from 'react-router-dom';
 import '../css/Form.css'
@@ -50,6 +52,13 @@ function FormPage() {
   const [searchPayerNameTerm, setSearchPayerNameTerm] = useState('');
   const [searchPayerContactNameTerm, setSearchPayerContactNameTerm] = useState('');
   const [searchPayerContactPhoneTerm, setSearchPayerContactPhoneTerm] = useState('');
+
+  // 转单相关状态
+  const [isTransferMode, setIsTransferMode] = useState(false);
+  const [previousOrderId, setPreviousOrderId] = useState('');
+  const [previousOrderSearchTerm, setPreviousOrderSearchTerm] = useState('');
+  const [previousOrderSearchResults, setPreviousOrderSearchResults] = useState([]);
+  const [selectedPreviousOrder, setSelectedPreviousOrder] = useState(null);
 
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [selectedPayer, setSelectedPayer] = useState(null);
@@ -259,7 +268,146 @@ function FormPage() {
     fetchPrices();
   }, [searchCustomerNameTerm, searchContactNameTerm, searchContactPhoneTerm, searchPayerNameTerm, searchPayerContactNameTerm, searchPayerContactPhoneTerm, searchTestItem, searchTestCondition, searchTestCode]);
 
+  // 搜索旧单号的防抖定时器
+  const [searchTimer, setSearchTimer] = useState(null);
+
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+      }
+    };
+  }, [searchTimer]);
+
+  // 搜索旧单号
+  const handleSearchPreviousOrder = async (searchTerm) => {
+    if (!searchTerm || searchTerm.trim() === '') {
+      setPreviousOrderSearchResults([]);
+      return;
+    }
+    
+    try {
+      const response = await searchOrders(searchTerm);
+      setPreviousOrderSearchResults(response.data || []);
+    } catch (error) {
+      console.error('搜索订单失败:', error);
+      setPreviousOrderSearchResults([]);
+    }
+  };
+
+  // 选择旧单号并自动预填
+  const handleSelectPreviousOrder = async (order) => {
+    // 先验证该订单是否可以转单
+    try {
+      const checkResponse = await checkOrder(order.order_id);
+      if (!checkResponse.data.exists) {
+        alert(`订单 ${order.order_id} 不存在！`);
+        return;
+      }
+      if (!checkResponse.data.canTransfer) {
+        alert(`订单 ${order.order_id} 已经转单过，不能再次转单！`);
+        return;
+      }
+    } catch (error) {
+      console.error('验证订单失败:', error);
+      alert('验证订单失败，请重试！');
+      return;
+    }
+    
+    setSelectedPreviousOrder(order);
+    setPreviousOrderId(order.order_id);
+    setPreviousOrderSearchTerm(order.order_id);
+    setPreviousOrderSearchResults([]);
+    
+    // 自动预填该订单的所有信息
+    try {
+      const { data } = await getCommission(order.order_id);
+      console.log("转单预填数据", data);
+      
+      setSelectedCustomer(data.customer);
+      setSelectedPayer(data.payer);
+      
+      // 处理服务方信息
+      if (data.serviceInfo) {
+        const acct = data.serviceInfo.account;
+        setFormData(f => ({ ...f, salesPerson: acct }));
+        setSalesEmail(data.serviceInfo.email);
+        setSalesPhone(data.serviceInfo.phone);
+        setSalesName(data.serviceInfo.name);
+      } else if (data.testItems[0]?.assignment_accounts?.length > 0) {
+        const acct = data.testItems[0].assignment_accounts.find(acct => acct && acct.includes('YW'));
+        if (acct) {
+          setFormData(f => ({ ...f, salesPerson: acct }));
+          const resp = await getSalespersonContact(acct);
+          setSalesEmail(resp.data.user_email);
+          setSalesPhone(resp.data.user_phone_num);
+          setSalesName((salespersons.find(s => s.account === acct)?.name || ''));
+        }
+      }
+      
+      const seals = data.orderInfo?.report_seals || [];
+      setFormData(prev => ({
+        ...prev,
+        reportType: Array.isArray(data.reportInfo?.type) ? data.reportInfo.type : [],
+        paperReportShippingType: data.reportInfo?.paper_report_shipping_type || '',
+        reportAdditionalInfo: data.reportInfo?.report_additional_info || '',
+        reportHeader: String(data.reportInfo?.header_type || ''),
+        reportHeaderAdditionalInfo: data.reportInfo?.header_other || '',
+        reportForm: String(data.reportInfo?.format_type || ''),
+        deliveryDays: data.orderInfo?.delivery_days_after_receipt != null ? String(data.orderInfo.delivery_days_after_receipt) : '',
+        sampleSolutionType: String(data.sampleHandling?.handling_type || ''),
+        sampleReturnInfo: data.sampleHandling?.return_info || { returnAddressOption: '', returnAddress: '' },
+        sampleShippingAddress: (data.sampleHandling?.return_info?.returnAddressOption === 'other' && data.sampleHandling?.return_info?.returnAddress) ? data.sampleHandling.return_info.returnAddress : '',
+        sampleRequirements: data.sampleRequirements || { hazards: [], hazardOther:'', magnetism:'', conductivity:'', breakable:'', brittle:'' },
+        testItems: (data.testItems || []).map(it => ({
+          ...it,
+          sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
+          sampleType: it.sample_type != null ? it.sample_type : (it.sampleType || ''),
+          arrival_mode: it.arrival_mode || '',
+          sample_arrival_status: it.sample_arrival_status || 'arrived',
+          discount_rate: it.discount_rate || '',
+          service_urgency: it.service_urgency || 'normal',
+          seq_no: it.seq_no != null ? it.seq_no : ''
+        })),
+        totalPrice: data.orderInfo?.total_price != null ? String(data.orderInfo.total_price) : '',
+        otherRequirements: data.orderInfo?.other_requirements || '',
+        subcontractingNotAccepted: data.orderInfo?.subcontracting_not_accepted || false,
+        reportSeals: seals
+      }));
+      
+      // 如果有绑定的付款方，显示预填提示
+      if (data.customer?.commissioner_id) {
+        try {
+          const prefillResp = await prefillPayment(data.customer.commissioner_id);
+          if (prefillResp.data.length > 0) {
+            setPrefillPayers(prefillResp.data);
+            // 如果只有一个付款方，自动选择
+            if (prefillResp.data.length === 1) {
+              setSelectedPayer(prefillResp.data[0]);
+            } else {
+              setShowPrefillModal(true);
+            }
+          }
+        } catch (error) {
+          console.error('拉取付款方信息失败:', error);
+        }
+      }
+      
+      alert('已自动预填旧单号信息！');
+    } catch (err) {
+      console.error('预填失败', err);
+      alert('预填数据失败，请检查旧单号是否正确');
+    }
+  };
+
+
   const handlePrefill = async () => {
+    if (isTransferMode) {
+      alert('当前为转单模式，请先关闭转单功能再使用预填功能！');
+      return;
+    }
+    
     if (!formData.orderNum) { alert('请先输入委托单号'); return; }
     
     // 检查委托单号是否包含特殊字符
@@ -318,7 +466,8 @@ function FormPage() {
           arrival_mode: it.arrival_mode || '',
           sample_arrival_status: it.sample_arrival_status || 'arrived',
           discount_rate: it.discount_rate || '',
-          service_urgency: it.service_urgency || 'normal'
+          service_urgency: it.service_urgency || 'normal',
+          seq_no: it.seq_no != null ? it.seq_no : ''
         }))
       }));
       alert('预填成功！');
@@ -334,7 +483,7 @@ function FormPage() {
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
       test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
-      arrival_mode: '', sample_arrival_status: ''
+      arrival_mode: '', sample_arrival_status: '', seq_no: ''
     }]}));
   };
 
@@ -505,6 +654,30 @@ function FormPage() {
     e.preventDefault();
     if (!window.confirm('请确认填写的信息是否正确，确认无误再提交')) return;
     
+    // 转单模式验证
+    if (isTransferMode) {
+      if (!previousOrderId || previousOrderId.trim() === '') {
+        alert('提交失败！转单模式下，旧单号为必填项');
+        return;
+      }
+      // 验证旧单号是否存在且未被转过
+      try {
+        const response = await checkOrder(previousOrderId.trim());
+        if (!response.data.exists) {
+          alert(`旧单号 ${previousOrderId} 不存在，请检查后重试！`);
+          return;
+        }
+        if (!response.data.canTransfer) {
+          alert(`旧单号 ${previousOrderId} 已经转单过，不能再次转单！`);
+          return;
+        }
+      } catch (error) {
+        console.error('验证订单失败:', error);
+        alert('验证订单失败，请重试！');
+        return;
+      }
+    }
+    
     // 检查委托单号是否包含特殊字符（如果用户输入了委托单号）
     if (formData.orderNum && formData.orderNum.trim()) {
       const specialChars = /[\s_.,\/?\-=]/;
@@ -567,6 +740,10 @@ function FormPage() {
       customerId: selectedCustomer.customer_id,
       paymentId: selectedPayer.payment_id,
       commissionerId: selectedCustomer.commissioner_id,
+      transferInfo: isTransferMode ? {
+        previousOrderId: previousOrderId.trim(),
+        note: null // 可以后续扩展添加备注
+      } : null,
       orderInfo: {
         sample_shipping_address: formData.sampleSolutionType === '3' && formData.sampleReturnInfo.returnAddressOption === 'other' ? formData.sampleShippingAddress : null,
         total_price: formData.totalPrice || null,
@@ -602,7 +779,8 @@ function FormPage() {
         discount_rate: item.discount_rate || null,
         arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode,
         sample_arrival_status: item.sample_arrival_status || 'arrived',
-        service_urgency: item.service_urgency || 'normal'
+        service_urgency: item.service_urgency || 'normal',
+        seq_no: item.seq_no || null
       })),
       assignmentInfo: { account: formData.salesPerson }
     };
@@ -699,7 +877,7 @@ function FormPage() {
       const now = new Date(); const yyyy = now.getFullYear(); const mm = String(now.getMonth() + 1).padStart(2, '0'); const dd = String(now.getDate()).padStart(2, '0');
       const receiptDate = `${yyyy}-${mm}-${dd}`;
 
-      const machiningItems = []; const mechanicsItems = []; const microItems = []; const physchemItems = [];
+      const machiningItems = []; const mechanicsItems = []; const microItems = []; const physchemItems = []; const chemistryItems = [];
       commissionData.testItems.forEach((item, idx) => {
         const [namePart, condPart] = (item.test_item || '').split(' - ').map(s => s.trim());
         const row = {
@@ -719,6 +897,7 @@ function FormPage() {
             case '3': mechanicsItems.push(row); break;
             case '1': microItems.push(row); break;
             case '2': physchemItems.push(row); break;
+            case '6': chemistryItems.push(row); break;
             default: break;
           }
         }
@@ -726,14 +905,18 @@ function FormPage() {
 
       const flowData = {
         order_num: response.data.orderNum,
+        customer_name: (selectedCustomer.customer_name || ''),
+        customer_contactName: (selectedCustomer.contact_name || ''),
         machiningCenterSymbol: machiningItems.length > 0 ? '☑' : '☐',
         mechanicsSymbol: mechanicsItems.length > 0 ? '☑' : '☐',
         microSymbol: hasDept(1) ? '☑' : '☐',
         physchemSymbol: hasDept(2) ? '☑' : '☐',
+        chemistrySymbol: hasDept(6) ? '☑' : '☐',
         sampleReceivedDate: receiptDate,
         showMechanicsTable: hasDept(3),
         showMicroTable: hasDept(1),
         showPhyschemTable: hasDept(2),
+        showChemistryTable: hasDept(6),
         reportContent1Symbol: commissionData.reportInfo.type.includes(1) ? '☑' : '☐',
         reportContent2Symbol: commissionData.reportInfo.type.includes(2) ? '☑' : '☐',
         reportContent3Symbol: commissionData.reportInfo.type.includes(3) ? '☑' : '☐',
@@ -772,14 +955,14 @@ function FormPage() {
         brittleYesSymbol: commissionData.sampleRequirements.brittle === 'yes' ? '☑ 是' : null,
         brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑ 否' : null,
         projectLeader: '',
-        machiningItems, mechanicsItems, microItems, physchemItems,
+        machiningItems, mechanicsItems, microItems, physchemItems, chemistryItems,
       };
 
       const orderNum = response.data.orderNum;
       const custName = selectedCustomer.customer_name;
       const contactName = selectedCustomer.contact_name;
       const cName = `${orderNum}-${custName}-${contactName}.docx`;
-      const fName = `${orderNum}.docx`;
+      const fName = `${orderNum}-${custName}-${contactName}.docx`;
       setCommissionFileName(cName); setFlowFileName(fName);
 
       const flowRes = await generateSampleFlow(flowData);
@@ -801,7 +984,7 @@ function FormPage() {
       setProcessTemplateUrl(processTemplateObjUrl);
       // 前端下载的模板文件名也按新规范
       setOrderTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
-      setProcessTemplateFileName(`${orderNum}.docx`);
+      setProcessTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
       setShowDownloadModal(true);
     } catch (error) {
       const msg = error.response?.data?.message || '服务器出现错误，请重试';
@@ -861,10 +1044,206 @@ function FormPage() {
         <h2>检测委托合同<br/>Testing Application Contract</h2>
       </div>
       <form onSubmit={handleSubmit}>
-        <label htmlFor="orderNum">任务编号 Task number:
-          <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="请输入委托单号或留空自动生成" />
-        </label>
-        <button type="button" onClick={handlePrefill} style={{ height: 32 }}>预填</button>
+        <div style={{ marginBottom: '16px' }}>
+          <button
+            type="button"
+            onClick={() => {
+              if (isTransferMode) {
+                // 取消转单模式
+                setIsTransferMode(false);
+                setPreviousOrderId('');
+                setPreviousOrderSearchTerm('');
+                setSelectedPreviousOrder(null);
+              } else {
+                // 开启转单模式
+                setIsTransferMode(true);
+                setFormData(prev => ({ ...prev, orderNum: '' }));
+              }
+            }}
+            style={{
+              padding: '8px 16px',
+              fontSize: '14px',
+              fontWeight: 'bold',
+              backgroundColor: isTransferMode ? '#dc3545' : '#28a745',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+              boxShadow: isTransferMode ? '0 2px 4px rgba(220, 53, 69, 0.3)' : '0 2px 4px rgba(40, 167, 69, 0.3)'
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.transform = 'translateY(-1px)';
+              e.target.style.boxShadow = isTransferMode 
+                ? '0 3px 6px rgba(220, 53, 69, 0.4)' 
+                : '0 3px 6px rgba(40, 167, 69, 0.4)';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = isTransferMode 
+                ? '0 2px 4px rgba(220, 53, 69, 0.3)' 
+                : '0 2px 4px rgba(40, 167, 69, 0.3)';
+            }}
+          >
+            {isTransferMode ? '✕ 取消转单模式' : '✓ 开启转单模式'}
+          </button>
+        </div>
+        
+        {isTransferMode ? (
+          <div style={{ marginBottom: '16px', padding: '12px', border: '1px solid #ccc', borderRadius: '4px' }}>
+            <label htmlFor="previousOrderId" style={{ display: 'block', marginBottom: '8px' }}>
+              旧单号 Previous Order Number<span style={{ color: 'red' }}>*</span>:
+            </label>
+            <div style={{ position: 'relative', display: 'inline-block', width: '300px' }}>
+              <input 
+                type="text" 
+                id="previousOrderId" 
+                value={previousOrderSearchTerm}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPreviousOrderSearchTerm(value);
+                  setPreviousOrderId(value);
+                  setSelectedPreviousOrder(null);
+                  
+                  // 清除之前的定时器
+                  if (searchTimer) {
+                    clearTimeout(searchTimer);
+                  }
+                  
+                  // 延迟搜索，避免频繁请求
+                  const timer = setTimeout(() => {
+                    handleSearchPreviousOrder(value);
+                  }, 300);
+                  setSearchTimer(timer);
+                }}
+                onBlur={() => {
+                  // 延迟隐藏，以便点击选择项
+                  setTimeout(() => {
+                    setPreviousOrderSearchResults([]);
+                  }, 200);
+                }}
+                placeholder="输入旧单号进行搜索"
+                style={{ width: '100%' }}
+              />
+              {previousOrderSearchResults.length > 0 && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  backgroundColor: 'white',
+                  border: '1px solid #ccc',
+                  borderTop: 'none',
+                  borderRadius: '0 0 4px 4px',
+                  maxHeight: '300px',
+                  overflowY: 'auto',
+                  zIndex: 1000,
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                }}>
+                  {previousOrderSearchResults.map(order => (
+                    <div
+                      key={order.order_id}
+                      onClick={() => handleSelectPreviousOrder(order)}
+                      style={{
+                        padding: '10px 12px',
+                        cursor: 'pointer',
+                        borderBottom: '1px solid #eee'
+                      }}
+                      onMouseEnter={(e) => e.target.style.backgroundColor = '#f0f0f0'}
+                      onMouseLeave={(e) => e.target.style.backgroundColor = 'white'}
+                    >
+                      <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{order.order_id}</div>
+                      <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                        <strong>客户：</strong>{order.customer_name}
+                      </div>
+                      {order.testItems && order.testItems.length > 0 && (
+                        <div style={{ fontSize: '12px', color: '#888', marginTop: '4px' }}>
+                          <strong>检测项目：</strong>
+                          <div style={{ marginLeft: '8px', marginTop: '2px' }}>
+                            {order.testItems.slice(0, 3).map((item, idx) => (
+                              <div key={idx} style={{ marginBottom: '2px' }}>
+                                • {item.display}
+                              </div>
+                            ))}
+                            {order.testItems.length > 3 && (
+                              <div style={{ color: '#999', fontStyle: 'italic' }}>
+                                ... 还有 {order.testItems.length - 3} 项
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {selectedPreviousOrder && (
+              <div style={{ 
+                padding: '12px', 
+                backgroundColor: '#e8f5e9', 
+                borderRadius: '4px', 
+                marginTop: '8px', 
+                marginBottom: '8px',
+                border: '1px solid #c8e6c9'
+              }}>
+                <div style={{ marginBottom: '8px' }}>
+                  <strong style={{ color: '#2e7d32' }}>已选择订单：</strong>
+                  <span style={{ fontWeight: 'bold', fontSize: '16px', marginLeft: '8px' }}>
+                    {selectedPreviousOrder.order_id}
+                  </span>
+                </div>
+                <div style={{ marginBottom: '8px', fontSize: '14px' }}>
+                  <strong>客户名称：</strong>{selectedPreviousOrder.customer_name}
+                </div>
+                {selectedPreviousOrder.testItems && selectedPreviousOrder.testItems.length > 0 && (
+                  <div style={{ fontSize: '14px' }}>
+                    <strong>检测项目：</strong>
+                    <div style={{ 
+                      marginLeft: '8px', 
+                      marginTop: '4px',
+                      maxHeight: '150px',
+                      overflowY: 'auto',
+                      padding: '8px',
+                      backgroundColor: 'white',
+                      borderRadius: '4px',
+                      border: '1px solid #ddd'
+                    }}>
+                      {selectedPreviousOrder.testItems.map((item, idx) => (
+                        <div key={idx} style={{ 
+                          marginBottom: '4px',
+                          padding: '4px 0',
+                          borderBottom: idx < selectedPreviousOrder.testItems.length - 1 ? '1px solid #eee' : 'none'
+                        }}>
+                          <span style={{ color: '#2e7d32' }}>•</span> {item.display}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            <label htmlFor="newOrderNum" style={{ display: 'block', marginTop: '8px' }}>
+              新单号 New Order Number（留空自动生成）:
+            </label>
+            <input 
+              type="text" 
+              id="newOrderNum" 
+              name="orderNum" 
+              value={formData.orderNum} 
+              onChange={handleInputChange} 
+              placeholder="留空将自动生成新单号"
+              style={{ width: '300px' }}
+            />
+          </div>
+        ) : (
+          <>
+            <label htmlFor="orderNum">任务编号 Task number:
+              <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="请输入委托单号或留空自动生成" />
+            </label>
+            <button type="button" onClick={handlePrefill} style={{ height: 32 }}>预填</button>
+          </>
+        )}
         <h3>委托方信息 Applicant Information&nbsp;<span style={{ color: 'red' }}>*</span></h3>
         <div className="block">
           <button type="button" onClick={() => setShowCustomerModal(true)}>选择委托方</button>
@@ -1000,6 +1379,7 @@ function FormPage() {
                 <th>检测标准<span style={{ color: 'red' }}>*</span><br/>Methods</th>
                 <th>到达方式<br/>Arrival</th>
                 <th>是否到达<br/>Arrived</th>
+                <th>流转顺序<br/>Seq No</th>
                 <th>服务加急<br/>Urgency</th>
                 <th>制样<br/>Sample preparation</th>
                 <th>数量<span style={{ color: 'red' }}>*</span><br/>Qty</th>
@@ -1107,6 +1487,19 @@ function FormPage() {
                         readOnly
                       /> 否
                     </label>
+                  </td>
+                  <td>
+                    <select 
+                      value={item.seq_no || ''} 
+                      onChange={e => handleTestItemChange(index, 'seq_no', e.target.value === '' ? '' : Number(e.target.value))}
+                      style={{ width: 70 + 'px' }}
+                    >
+                      <option value="">--</option>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                      <option value="4">4</option>
+                    </select>
                   </td>
                   <td>
                     <select value={item.service_urgency || 'normal'} onChange={e => handleTestItemChange(index, 'service_urgency', e.target.value)}>
@@ -1350,6 +1743,7 @@ function FormPage() {
             </div>
           </div>
         )}
+
 
       </form>
 

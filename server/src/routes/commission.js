@@ -358,6 +358,34 @@ router.post('/', async (req, res, next) => {
       }
     }
     
+    // 处理转单逻辑
+    const previousOrderId = payload?.transferInfo?.previousOrderId || null;
+    let rootOrderId = null;
+    
+    // 如果存在旧单号，需要验证其存在性、是否已被转过，并获取根单号
+    if (previousOrderId) {
+      const [[previousOrder]] = await conn.query(
+        `SELECT order_id, root_order_id, original_order_id FROM orders WHERE order_id = ? FOR UPDATE`,
+        [previousOrderId]
+      );
+      if (!previousOrder) {
+        throw Object.assign(new Error('旧单号不存在'), { status: 400 });
+      }
+      
+      // 检查该订单是否已经被转过（即是否在order_transfer_history中作为previous_order_id存在）
+      const [[transferRecord]] = await conn.query(
+        `SELECT history_id FROM order_transfer_history WHERE previous_order_id = ? LIMIT 1`,
+        [previousOrderId]
+      );
+      
+      if (transferRecord) {
+        throw Object.assign(new Error(`旧单号 ${previousOrderId} 已经被转过，不能再转单`), { status: 400 });
+      }
+      
+      // 根单号：如果旧单号有root_order_id则使用它，否则使用旧单号本身
+      rootOrderId = previousOrder.root_order_id || previousOrder.original_order_id || previousOrderId;
+    }
+
     // 决定 order_id（如果前端有传就校验唯一，不存在则生成 JC + YYMM + seq）
     let order_id = payload?.orderInfo?.order_num || null;
 
@@ -394,15 +422,31 @@ router.post('/', async (req, res, next) => {
 
     // 创建订单（created_by 暂用 assignmentAccount 或 'LX001'）
     const created_by = assignmentAccount || 'LX001';
-    try { console.log('[commission][POST] creating order', { order_id, created_by }); } catch (_) {}
+    const is_transferred = previousOrderId ? 1 : 0;
+    const original_order_id = previousOrderId || null;
+    
+    try { console.log('[commission][POST] creating order', { order_id, created_by, is_transferred, original_order_id, rootOrderId }); } catch (_) {}
     await conn.query(
-      `INSERT INTO orders (order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO orders (order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note, is_transferred, original_order_id, root_order_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [order_id, customerId, paymentId || null, commissionerId, created_by,
        payload?.orderInfo?.is_internal ? 1 : 0,
        payload?.orderInfo?.agreement_note || null,
-       payload?.orderInfo?.other_requirements || null]
+       payload?.orderInfo?.other_requirements || null,
+       is_transferred,
+       original_order_id,
+       rootOrderId]
     );
+    
+    // 如果是转单，插入转单历史记录
+    if (previousOrderId) {
+      const transferDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD格式
+      await conn.query(
+        `INSERT INTO order_transfer_history (order_id, previous_order_id, transfer_date, created_by, note)
+         VALUES (?, ?, ?, ?, ?)`,
+        [order_id, previousOrderId, transferDate, created_by, payload?.transferInfo?.note || null]
+      );
+    }
 
     if (orderInfo.total_price || orderInfo.delivery_days_after_receipt || orderInfo.subcontracting_not_accepted !== undefined) {
       await conn.query(
@@ -596,7 +640,7 @@ router.post('/', async (req, res, next) => {
         line_total,
         0,
         isOutsourcedProject ? 1 : 0,
-        null,
+        item.seq_no || null,
         item.sample_name || null,
         item.material || null,
         item.sample_type || null,
@@ -902,6 +946,97 @@ router.get('/search', async (req, res, next) => {
     values.push(limit, offset);
     const [rows] = await pool.query(sql, values);
     res.json(rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * 搜索订单（用于转单时查询旧单号）
+ * GET /api/commission/search-orders?q=JC...
+ */
+router.get('/search-orders', async (req, res, next) => {
+  try {
+    const { q, limit = 20 } = req.query;
+    if (!q || q.trim() === '') {
+      return res.json([]);
+    }
+    
+    const searchTerm = `%${q.trim()}%`;
+    // 排除已经被转单过的订单（在order_transfer_history表中作为previous_order_id存在的订单）
+    const [rows] = await pool.query(
+      `SELECT DISTINCT o.order_id, c.customer_name, o.created_at
+       FROM orders o
+       JOIN customers c ON c.customer_id = o.customer_id
+       LEFT JOIN order_transfer_history oth ON oth.previous_order_id = o.order_id
+       WHERE o.order_id LIKE ? AND oth.previous_order_id IS NULL
+       ORDER BY o.created_at DESC
+       LIMIT ?`,
+      [searchTerm, Number(limit)]
+    );
+    
+    // 为每个订单查询test_items信息
+    const ordersWithItems = await Promise.all(
+      rows.map(async (order) => {
+        const [items] = await pool.query(
+          `SELECT category_name, detail_name 
+           FROM test_items 
+           WHERE order_id = ? 
+           ORDER BY test_item_id 
+           LIMIT 10`,
+          [order.order_id]
+        );
+        return {
+          ...order,
+          testItems: items.map(item => ({
+            category_name: item.category_name,
+            detail_name: item.detail_name,
+            display: `${item.category_name}${item.detail_name ? ' - ' + item.detail_name : ''}`
+          }))
+        };
+      })
+    );
+    
+    res.json(ordersWithItems);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * 验证订单是否存在
+ * GET /api/commission/check-order?orderNum=JC...
+ */
+router.get('/check-order', async (req, res, next) => {
+  try {
+    const { orderNum } = req.query;
+    if (!orderNum) {
+      return res.status(400).json({ message: 'orderNum required', exists: false });
+    }
+    
+    const [[order]] = await pool.query(
+      `SELECT order_id FROM orders WHERE order_id = ?`,
+      [orderNum]
+    );
+    
+    if (!order) {
+      return res.json({ exists: false, order_id: null, isTransferred: false });
+    }
+    
+    // 检查该订单是否已经被转过（即是否在order_transfer_history中作为previous_order_id存在）
+    const [[transferRecord]] = await pool.query(
+      `SELECT history_id FROM order_transfer_history WHERE previous_order_id = ? LIMIT 1`,
+      [orderNum]
+    );
+    
+    const canTransfer = !transferRecord; // 如果没有转单记录，则可以转单
+    
+    res.json({ 
+      exists: true, 
+      canTransfer: canTransfer,
+      order_id: order.order_id,
+      message: canTransfer ? null : '该订单已经转单过，不能再次转单'
+    });
   } catch (e) {
     next(e);
   }

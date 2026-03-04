@@ -138,9 +138,10 @@ router.post('/generate-process-template', async (req, res) => {
     const report = doc.getZip().generate({ type: 'nodebuffer' });
     console.log('流转单文档生成成功，大小:', report.length);
 
-    // 设置响应头（命名：{委托单号}_流转单.docx）
+    // 设置响应头（命名：委托单号+客户名称+委托联系人名称）
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    const fileName = `${flowData.order_num}_流转单.docx`;
+    const safe = (s) => (typeof s === 'string' ? s.trim() : '');
+    const fileName = `${safe(flowData.order_num)}-${safe(flowData.customer_name)}-${safe(flowData.customer_contactName)}.docx`;
     const encodedFileName = encodeURIComponent(fileName);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`);
     

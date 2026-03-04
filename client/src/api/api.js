@@ -44,3 +44,9 @@ export const generateOrderTemplate = (data) =>
 
 export const generateProcessTemplate = (data) =>
   axios.post('/api/templates/generate-process-template', data, { responseType: 'blob' })
+
+export const searchOrders = (q) =>
+  axios.get('/api/commission/search-orders', { params: { q } })
+
+export const checkOrder = (orderNum) =>
+  axios.get('/api/commission/check-order', { params: { orderNum } })
