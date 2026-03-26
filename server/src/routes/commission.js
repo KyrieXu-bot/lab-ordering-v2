@@ -139,6 +139,7 @@ router.get('/', async (req, res, next) => {
         test_method: ti.standard_code || '',
         sample_preparation: ti.sample_preparation || '',
         quantity: ti.quantity || 1,
+        unit: ti.unit || '',
         department_id: ti.department_id || '',
         note: ti.note || '',
         price_id: ti.price_id || null,
@@ -504,7 +505,9 @@ router.post('/', async (req, res, next) => {
     );
 
     // 插入 test_items
-    for (const item of payload.testItems || []) {
+    const testItems = Array.isArray(payload.testItems) ? payload.testItems : [];
+    for (let tiIndex = 0; tiIndex < testItems.length; tiIndex++) {
+      const item = testItems[tiIndex];
       try {
         console.log('[commission][POST] -> test_item incoming', {
           name: item.test_item,
@@ -515,31 +518,25 @@ router.post('/', async (req, res, next) => {
           quantity: item.quantity
         });
       } catch (_) {}
+      const unit = item.unit != null ? String(item.unit).trim() : '';
+      if (!unit) {
+        throw Object.assign(new Error(`提交失败！第${tiIndex + 1}行：单位为必填项`), { status: 400 });
+      }
       const name = (item.test_item || '').trim();
       const parts = name.split(' - ');
       const category_name = (parts[0] || '').trim();
       const detail_name   = (parts.slice(1).join(' - ') || '').trim(); // 允许名称里含 -
       
-      // unit_price现在是varchar类型，支持带字符的价格（如"800一件"）
-      // 尝试转换为数字用于计算，如果不能转换为数字则保留原字符串
+      // 创建开单阶段仅写入 unit_price，不在此阶段计算金额字段
       let unit_price = item.unit_price != null && String(item.unit_price).trim() !== '' ? item.unit_price : null;
-      let final_unit_price = unit_price;
+      let final_unit_price = null;
       let line_total = null;
-      
-      // 如果unit_price可以转换为数字，则进行计算
-      if (unit_price != null) {
-        const numPrice = Number(unit_price);
-        if (!isNaN(numPrice)) {
-          final_unit_price = numPrice;
-          line_total = numPrice && item.quantity ? (numPrice * Number(item.quantity)) : null;
-        }
-      }
 
       // 获取price表信息用于判断项目类型
       let priceInfo = null;
       if (item.price_id) {
         const [priceRows] = await conn.query(
-          `SELECT test_code, category_name, group_id, is_outsourced, department_id 
+          `SELECT test_code, category_name, group_id, is_outsourced, department_id, amount, \`unit\`
            FROM price WHERE price_id = ?`,
           [item.price_id]
         );
@@ -547,6 +544,13 @@ router.post('/', async (req, res, next) => {
       }
 
       try { console.log('[commission][POST] priceInfo', priceInfo); } catch (_) {}
+
+      // 标准项目：以 price.amount 覆盖 unit_price；金额计算放到后续LIMS流程
+      if (priceInfo && priceInfo.amount != null && String(priceInfo.amount).trim() !== '') {
+        unit_price = priceInfo.amount;
+        final_unit_price = null;
+        line_total = null;
+      }
 
       // 判断是否为标准项目
       const isStandardProject = priceInfo && 
@@ -621,8 +625,8 @@ router.post('/', async (req, res, next) => {
           order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
           sample_name, material, sample_type, original_no, sample_preparation, note, price_note,
-          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
       const [r] = await conn.query(insertTestItemSql, [
         order_id,
@@ -658,7 +662,8 @@ router.post('/', async (req, res, next) => {
           : (payload?.arrivalInfo?.sampleArrived === 'yes' ? 'arrived' : 'not_arrived'),
         item.service_urgency || 'normal',
         'new', // 初始状态为new
-        testItemSupervisorId // 负责人ID
+        testItemSupervisorId, // 负责人ID
+        unit // 单位（必填）
       ]);
       const test_item_id = r.insertId;
 
@@ -793,45 +798,34 @@ router.put('/:id', async (req, res, next) => {
     // 6. 更新 test_items 表
     if (payload.testItems) {
       for (const item of payload.testItems) {
-        const updateTestItem = [];
-        if (item.price_id !== undefined) updateTestItem.push(`price_id = ?`);
-        if (item.test_code !== undefined) updateTestItem.push(`test_code = ?`);
-        if (item.test_method !== undefined) updateTestItem.push(`standard_code = ?`);
-        if (item.department_id !== undefined) updateTestItem.push(`department_id = ?`);
-        if (item.group_id !== undefined) updateTestItem.push(`group_id = ?`);
-        if (item.quantity !== undefined) updateTestItem.push(`quantity = ?`);
-        if (item.unit_price !== undefined) updateTestItem.push(`unit_price = ?`);
-        if (item.discount_rate !== undefined) updateTestItem.push(`discount_rate = ?`);
-        if (item.final_unit_price !== undefined) updateTestItem.push(`final_unit_price = ?`);
-        if (item.line_total !== undefined) updateTestItem.push(`line_total = ?`);
-        if (item.note !== undefined) updateTestItem.push(`note = ?`);
-        if (item.price_note !== undefined) updateTestItem.push(`price_note = ?`);
-        if (item.arrival_mode !== undefined) updateTestItem.push(`arrival_mode = ?`);
-        if (item.sample_arrival_status !== undefined) updateTestItem.push(`sample_arrival_status = ?`);
-        if (item.service_urgency !== undefined) updateTestItem.push(`service_urgency = ?`);
-        if (item.status !== undefined) updateTestItem.push(`status = ?`);
-        if (item.supervisor_id !== undefined) updateTestItem.push(`supervisor_id = ?`);
-        if (updateTestItem.length > 0) {
-          await pool.query(`UPDATE test_items SET ${updateTestItem.join(', ')} WHERE test_item_id = ?`, [
-            item.price_id || null,
-            item.test_code || null,
-            item.test_method || null,
-            item.department_id || null,
-            item.group_id || null,
-            item.quantity || 1,
-            item.unit_price,
-            item.discount_rate || null,
-            item.final_unit_price,
-            item.line_total,
-            item.note || null,
-            item.price_note || null,
-            item.arrival_mode || null,
-            item.sample_arrival_status || null,
-            item.service_urgency || 'normal',
-            item.status || 'new',
-            item.supervisor_id || null,
-            item.test_item_id
-          ]);
+        const setFragments = [];
+        const vals = [];
+
+        if (item.price_id !== undefined) { setFragments.push(`price_id = ?`); vals.push(item.price_id ?? null); }
+        if (item.test_code !== undefined) { setFragments.push(`test_code = ?`); vals.push(item.test_code ?? null); }
+        if (item.test_method !== undefined) { setFragments.push(`standard_code = ?`); vals.push(item.test_method ?? null); }
+        if (item.department_id !== undefined) { setFragments.push(`department_id = ?`); vals.push(item.department_id ?? null); }
+        if (item.group_id !== undefined) { setFragments.push(`group_id = ?`); vals.push(item.group_id ?? null); }
+        if (item.quantity !== undefined) { setFragments.push(`quantity = ?`); vals.push(item.quantity ?? 1); }
+        if (item.unit_price !== undefined) { setFragments.push(`unit_price = ?`); vals.push(item.unit_price); }
+        if (item.unit !== undefined) { setFragments.push(`unit = ?`); vals.push(item.unit); }
+        if (item.discount_rate !== undefined) { setFragments.push(`discount_rate = ?`); vals.push(item.discount_rate ?? null); }
+        if (item.final_unit_price !== undefined) { setFragments.push(`final_unit_price = ?`); vals.push(item.final_unit_price); }
+        if (item.line_total !== undefined) { setFragments.push(`line_total = ?`); vals.push(item.line_total); }
+        if (item.note !== undefined) { setFragments.push(`note = ?`); vals.push(item.note ?? null); }
+        if (item.price_note !== undefined) { setFragments.push(`price_note = ?`); vals.push(item.price_note ?? null); }
+        if (item.arrival_mode !== undefined) { setFragments.push(`arrival_mode = ?`); vals.push(item.arrival_mode ?? null); }
+        if (item.sample_arrival_status !== undefined) { setFragments.push(`sample_arrival_status = ?`); vals.push(item.sample_arrival_status ?? null); }
+        if (item.service_urgency !== undefined) { setFragments.push(`service_urgency = ?`); vals.push(item.service_urgency ?? 'normal'); }
+        if (item.status !== undefined) { setFragments.push(`status = ?`); vals.push(item.status ?? 'new'); }
+        if (item.supervisor_id !== undefined) { setFragments.push(`supervisor_id = ?`); vals.push(item.supervisor_id ?? null); }
+
+        if (setFragments.length > 0) {
+          vals.push(item.test_item_id);
+          await pool.query(
+            `UPDATE test_items SET ${setFragments.join(', ')} WHERE test_item_id = ?`,
+            vals
+          );
         }
       }
     }

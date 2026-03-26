@@ -93,6 +93,8 @@ router.get('/prices', async (req, res, next) => {
               detail_name   AS test_condition,
               standard_code AS test_standard,
               unit_price,
+              amount,
+              \`unit\` AS unit,
               department_id,
               group_id
        FROM price

@@ -70,7 +70,8 @@ function FormPage() {
     { department_id: 1, department_name: '显微组织表征实验室' },
     { department_id: 2, department_name: '物化性能测试实验室' },
     { department_id: 3, department_name: '力学性能测试实验室' },
-    { department_id: 5, department_name: '委外' }
+    { department_id: 5, department_name: '委外' },
+    { department_id: 6, department_name: '化学分析实验室' }
   ];
   const navigate = useNavigate();
 
@@ -84,6 +85,7 @@ function FormPage() {
     { value: 'urgent_1_5x', label: '加急1.5倍' },
     { value: 'urgent_2x', label: '特急2倍' },
   ];
+  const unitOptions = ['样品数', '机时', '点位', '次', '图', '天', '元素', '曲线'];
 
   // 初始化表单数据
   const [formData, setFormData] = useState({
@@ -158,7 +160,8 @@ function FormPage() {
     test_item: `${p.test_item_name} - ${p.test_condition}`,
     test_condition: p.test_condition,
     test_method: p.test_standard,
-    unit_price: p.unit_price,
+    unit: p.unit || '',
+    unit_price: p.amount != null ? p.amount : p.unit_price,
     department_id: p.department_id,
     group_id: p.group_id,
     discount_rate: '',
@@ -462,6 +465,7 @@ function FormPage() {
           // 统一键名到前端使用的 camelCase，避免不可编辑/覆盖问题
           sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
           sampleType: it.sample_type != null ? it.sample_type : (it.sampleType || ''),
+          unit: it.unit || '',
           // 其它已使用的键保持不变
           arrival_mode: it.arrival_mode || '',
           sample_arrival_status: it.sample_arrival_status || 'arrived',
@@ -482,7 +486,7 @@ function FormPage() {
   const addTestItem = () => {
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
-      test_item: '', test_method: '', quantity: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
+      test_item: '', test_method: '', quantity: '', unit: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
       arrival_mode: '', sample_arrival_status: '', seq_no: ''
     }]}));
   };
@@ -705,6 +709,7 @@ function FormPage() {
       if (!ti.test_item) { alert(`提交失败！第${i + 1}行：检测项目为必填项`); return; }
       if (!ti.test_method) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
       if (!ti.quantity) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
+      if (!ti.unit || String(ti.unit).trim() === '') { alert(`提交失败！第${i + 1}行：单位为必填项`); return; }
       if (!ti.department_id) { alert(`提交失败！第${i + 1}行：部门为必填项`); return; }
       if (!ti.arrival_mode) { alert(`提交失败！第${i + 1}行：到达方式为必填项`); return; }
       if (!ti.sample_arrival_status) { alert(`提交失败！第${i + 1}行：是否到达为必填项`); return; }
@@ -774,7 +779,11 @@ function FormPage() {
         sample_name: item.sampleName, material: item.material || '',
         sample_type: item.sampleType === '5' ? item.sampleTypeCustom?.trim() : item.sampleType,
         original_no: item.original_no || '', test_item: item.test_item, test_method: item.test_method,
-        sample_preparation: item.sample_preparation, quantity: item.quantity, department_id: item.department_id, note: item.note || '',
+        sample_preparation: item.sample_preparation,
+        quantity: item.quantity,
+        unit: item.unit || '',
+        unit_price: item.unit_price != null && String(item.unit_price).trim() !== '' ? item.unit_price : null,
+        department_id: item.department_id, note: item.note || '',
         price_id: item.price_id, test_code: item.test_code, test_condition: item.test_condition, price_note: item.price_note, group_id: item.group_id,
         discount_rate: item.discount_rate || null,
         arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode,
@@ -1374,6 +1383,7 @@ function FormPage() {
                 <th>样品状态<span style={{ color: 'red' }}>*</span><br/>Sample Status</th>
                 <th>样品原号<br/>Sample No.</th>
                 <th>价格备注<br/>Price Note</th>
+                <th>单位<span style={{ color: 'red' }}>*</span><br/>Unit</th>
                 <th>折扣<br/>Discount(%)</th>
                 <th>检测项目<span style={{ color: 'red' }}>*</span><br/>Test Items</th>
                 <th>检测标准<span style={{ color: 'red' }}>*</span><br/>Methods</th>
@@ -1423,6 +1433,18 @@ function FormPage() {
                       }} 
                       placeholder="可选"
                     />
+                  </td>
+                  <td>
+                    <select
+                      value={item.unit || ''}
+                      onChange={(e) => handleTestItemChange(index, 'unit', e.target.value)}
+                      style={{ width: 80 + 'px' }}
+                    >
+                      <option value="" disabled>--请选择--</option>
+                      {unitOptions.map(u => (
+                        <option key={u} value={u}>{u}</option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <input 
@@ -1693,7 +1715,7 @@ function FormPage() {
               </div>
               <div className="table-container">
                 <table className="payer-table">
-                  <thead><tr><th className='title-id'>ID</th><th>测试代码</th><th>检测项目</th><th>检测条件</th><th>检测标准</th><th>单价</th><th>操作</th></tr></thead>
+                  <thead><tr><th className='title-id'>ID</th><th>测试代码</th><th>检测项目</th><th>检测条件</th><th>检测标准</th><th>金额</th><th>单位</th><th>操作</th></tr></thead>
                   <tbody>
                     {priceList
                       .filter(item => item.test_item_name.includes(searchTestItem) && item.test_condition.includes(searchTestCondition) && item.test_code.includes(searchTestCode))
@@ -1704,7 +1726,8 @@ function FormPage() {
                           <td>{item.test_item_name}</td>
                           <td>{item.test_condition}</td>
                           <td>{item.test_standard}</td>
-                          <td>{item.unit_price}</td>
+                          <td>{item.amount}</td>
+                          <td>{item.unit}</td>
                           <td><button onClick={() => handlePriceSelect(item)}>选择</button></td>
                         </tr>
                       ))}

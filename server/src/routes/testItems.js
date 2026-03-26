@@ -6,7 +6,7 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       order_id, price_id = null, category_name, detail_name, test_code = null, standard_code = null,
-      department_id = null, group_id = null, quantity = 1, unit_price = null,
+      department_id = null, group_id = null, quantity = 1, unit_price = null, unit = null,
       discount_rate = null, final_unit_price = null, line_total = null,
       is_add_on = 0, is_outsourced = 0, seq_no = null
     } = req.body;
@@ -14,10 +14,10 @@ router.post('/', async (req, res, next) => {
     const [result] = await pool.query(
       `INSERT INTO test_items
        (order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
-        quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no)
+        quantity, unit_price, \`unit\`, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
-       quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no]
+       quantity, unit_price, unit, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no]
     );
     res.status(201).json({ test_item_id: result.insertId });
   } catch (e) { next(e); }
@@ -27,7 +27,7 @@ router.patch('/:id', async (req, res, next) => {
   try {
     const id = req.params.id;
     const fields = [
-      'quantity','unit_price','discount_rate','final_unit_price','line_total',
+      'quantity','unit_price','unit','discount_rate','final_unit_price','line_total',
       'machine_hours','work_hours','status','current_assignee','seq_no','is_add_on','is_outsourced'
     ];
     const sets = []; const vals = [];
