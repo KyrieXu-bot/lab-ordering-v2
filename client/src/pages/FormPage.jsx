@@ -161,7 +161,7 @@ function FormPage() {
     test_condition: p.test_condition,
     test_method: p.test_standard,
     unit: p.unit || '',
-    unit_price: p.amount != null ? p.amount : p.unit_price,
+    unit_price: p.amount != null && String(p.amount).trim() !== '' ? p.amount : null,
     department_id: p.department_id,
     group_id: p.group_id,
     discount_rate: '',
@@ -212,6 +212,33 @@ function FormPage() {
   const reportFormOptions = { '一份委托单对应一个报告 One application Form To a Report': 1, '每一个项目对应一份报告 Each Item Corresponds To a Report': 2 }
 
   const typeMappings = { sampleType: { '板材': 1, '棒材': 2, '粉末': 3, '液体': 4, '其他': 5 } }
+
+  /** 预填：将接口的 sample_type / seq_no 规范成与表单控件一致的类型（下拉 value 为字符串 1–5） */
+  const normalizePrefillTestItemFields = (it) => {
+    const rawType = it.sample_type != null ? it.sample_type : it.sampleType
+    const s = rawType == null ? '' : String(rawType).trim()
+    const labelToCode = { 板材: '1', 棒材: '2', 粉末: '3', 液体: '4', 其他: '5' }
+    let sampleType = ''
+    let sampleTypeCustom = ''
+    if (s === '') {
+      sampleType = ''
+    } else if (/^[1-5]$/.test(s)) {
+      sampleType = s
+    } else if (labelToCode[s]) {
+      sampleType = labelToCode[s]
+    } else {
+      sampleType = '5'
+      sampleTypeCustom = s
+    }
+    const rawSeq = it.seq_no != null ? it.seq_no : ''
+    let seq_no = ''
+    if (rawSeq !== '' && rawSeq != null) {
+      const n = Number(rawSeq)
+      if (Number.isFinite(n) && n >= 1 && n <= 4) seq_no = n
+      else seq_no = ''
+    }
+    return { sampleType, sampleTypeCustom, seq_no }
+  }
   const hazardOptions = [
     { key: 'Safety', label: '无危险性 Safety' },
     { key: 'Flammability', label: '易燃易爆 Flammability' },
@@ -363,16 +390,20 @@ function FormPage() {
         sampleReturnInfo: data.sampleHandling?.return_info || { returnAddressOption: '', returnAddress: '' },
         sampleShippingAddress: (data.sampleHandling?.return_info?.returnAddressOption === 'other' && data.sampleHandling?.return_info?.returnAddress) ? data.sampleHandling.return_info.returnAddress : '',
         sampleRequirements: data.sampleRequirements || { hazards: [], hazardOther:'', magnetism:'', conductivity:'', breakable:'', brittle:'' },
-        testItems: (data.testItems || []).map(it => ({
-          ...it,
-          sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
-          sampleType: it.sample_type != null ? it.sample_type : (it.sampleType || ''),
-          arrival_mode: it.arrival_mode || '',
-          sample_arrival_status: it.sample_arrival_status || 'arrived',
-          discount_rate: it.discount_rate || '',
-          service_urgency: it.service_urgency || 'normal',
-          seq_no: it.seq_no != null ? it.seq_no : ''
-        })),
+        testItems: (data.testItems || []).map(it => {
+          const { sampleType, sampleTypeCustom, seq_no } = normalizePrefillTestItemFields(it)
+          return {
+            ...it,
+            sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
+            sampleType,
+            ...(sampleType === '5' && sampleTypeCustom ? { sampleTypeCustom } : {}),
+            arrival_mode: it.arrival_mode || '',
+            sample_arrival_status: it.sample_arrival_status || 'arrived',
+            discount_rate: it.discount_rate || '',
+            service_urgency: it.service_urgency || 'normal',
+            seq_no
+          }
+        }),
         totalPrice: data.orderInfo?.total_price != null ? String(data.orderInfo.total_price) : '',
         otherRequirements: data.orderInfo?.other_requirements || '',
         subcontractingNotAccepted: data.orderInfo?.subcontracting_not_accepted || false,
@@ -460,19 +491,21 @@ function FormPage() {
         sampleReturnInfo: data.sampleHandling?.return_info || { returnAddressOption: '', returnAddress: '' },
         sampleShippingAddress: (data.sampleHandling?.return_info?.returnAddressOption === 'other' && data.sampleHandling?.return_info?.returnAddress) ? data.sampleHandling.return_info.returnAddress : '',
         sampleRequirements: data.sampleRequirements || { hazards: [], hazardOther:'', magnetism:'', conductivity:'', breakable:'', brittle:'' },
-        testItems: (data.testItems || []).map(it => ({
-          ...it,
-          // 统一键名到前端使用的 camelCase，避免不可编辑/覆盖问题
-          sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
-          sampleType: it.sample_type != null ? it.sample_type : (it.sampleType || ''),
-          unit: it.unit || '',
-          // 其它已使用的键保持不变
-          arrival_mode: it.arrival_mode || '',
-          sample_arrival_status: it.sample_arrival_status || 'arrived',
-          discount_rate: it.discount_rate || '',
-          service_urgency: it.service_urgency || 'normal',
-          seq_no: it.seq_no != null ? it.seq_no : ''
-        }))
+        testItems: (data.testItems || []).map(it => {
+          const { sampleType, sampleTypeCustom, seq_no } = normalizePrefillTestItemFields(it)
+          return {
+            ...it,
+            sampleName: it.sample_name != null ? it.sample_name : (it.sampleName || ''),
+            sampleType,
+            ...(sampleType === '5' && sampleTypeCustom ? { sampleTypeCustom } : {}),
+            unit: it.unit || '',
+            arrival_mode: it.arrival_mode || '',
+            sample_arrival_status: it.sample_arrival_status || 'arrived',
+            discount_rate: it.discount_rate || '',
+            service_urgency: it.service_urgency || 'normal',
+            seq_no
+          }
+        })
       }));
       alert('预填成功！');
     } catch (err) { console.error('预填失败', err); alert('预填数据失败，请检查委托单号是否正确'); }
@@ -1411,9 +1444,9 @@ function FormPage() {
                     {String(item.sampleType) === '5' ? (
                       <input type="text" placeholder="请输入" value={item.sampleTypeCustom || ''} onChange={e => handleTestItemChange(index, 'sampleTypeCustom', e.target.value)} />
                     ) : (
-                      <select value={item.sampleType} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)}>
+                      <select value={item.sampleType === '' || item.sampleType == null ? '' : String(item.sampleType)} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)}>
                         <option value="" disabled>请选择</option>
-                        {Object.entries(typeMappings.sampleType).map(([label, val]) => (<option key={val} value={val}>{label}</option>))}
+                        {Object.entries(typeMappings.sampleType).map(([label, val]) => (<option key={val} value={String(val)}>{label}</option>))}
                       </select>
                     )}
                   </td>
@@ -1447,20 +1480,20 @@ function FormPage() {
                     </select>
                   </td>
                   <td>
-                    <input 
-                      type="number" 
-                      min="0" 
-                      max="100" 
-                      step="0.01"
-                      value={item.discount_rate || ''} 
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={item.discount_rate || ''}
                       onChange={e => {
                         const val = e.target.value;
-                        if (val === '' || (Number(val) >= 0 && Number(val) <= 100)) {
-                          handleTestItemChange(index, 'discount_rate', val);
-                        } else if (Number(val) > 100) {
-                          alert('折扣率不能超过100%');
+                        if (val === '' || /^\d*\.?\d*$/.test(val)) {
+                          if (val === '' || Number(val) <= 100) {
+                            handleTestItemChange(index, 'discount_rate', val);
+                          } else {
+                            alert('折扣率不能超过100%');
+                          }
                         }
-                      }} 
+                      }}
                       placeholder="0-100"
                       style={{ width: 70 + 'px' }}
                     />
@@ -1512,7 +1545,7 @@ function FormPage() {
                   </td>
                   <td>
                     <select 
-                      value={item.seq_no || ''} 
+                      value={item.seq_no === '' || item.seq_no == null ? '' : String(item.seq_no)} 
                       onChange={e => handleTestItemChange(index, 'seq_no', e.target.value === '' ? '' : Number(e.target.value))}
                       style={{ width: 70 + 'px' }}
                     >

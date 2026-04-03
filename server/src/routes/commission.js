@@ -151,7 +151,8 @@ router.get('/', async (req, res, next) => {
         assignment_accounts: assignment_accounts,
         arrival_mode: ti.arrival_mode || '',
         sample_arrival_status: ti.sample_arrival_status || 'arrived',
-        service_urgency: ti.service_urgency || 'normal'
+        service_urgency: ti.service_urgency || 'normal',
+        seq_no: ti.seq_no != null && ti.seq_no !== '' ? Number(ti.seq_no) : null
       };
     });
 
@@ -545,9 +546,18 @@ router.post('/', async (req, res, next) => {
 
       try { console.log('[commission][POST] priceInfo', priceInfo); } catch (_) {}
 
-      // 标准项目：以 price.amount 覆盖 unit_price；金额计算放到后续LIMS流程
-      if (priceInfo && priceInfo.amount != null && String(priceInfo.amount).trim() !== '') {
-        unit_price = priceInfo.amount;
+      // 单位一致性标记：0=一致，1=不一致（创建时只判断，不做人工处理状态2）
+      let unit_mismatch_reviewed = 0;
+      if (priceInfo && priceInfo.unit != null && String(priceInfo.unit).trim() !== '') {
+        const priceUnit = String(priceInfo.unit).trim();
+        unit_mismatch_reviewed = priceUnit === unit ? 0 : 1;
+      }
+
+      // 标准项目（有price_id）只允许使用 price.amount；不再回退到 price.unit_price 字符串
+      if (priceInfo) {
+        unit_price = (priceInfo.amount != null && String(priceInfo.amount).trim() !== '')
+          ? priceInfo.amount
+          : null;
         final_unit_price = null;
         line_total = null;
       }
@@ -625,8 +635,8 @@ router.post('/', async (req, res, next) => {
           order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
           sample_name, material, sample_type, original_no, sample_preparation, note, price_note,
-          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`, unit_mismatch_reviewed
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
       const [r] = await conn.query(insertTestItemSql, [
         order_id,
@@ -663,7 +673,8 @@ router.post('/', async (req, res, next) => {
         item.service_urgency || 'normal',
         'new', // 初始状态为new
         testItemSupervisorId, // 负责人ID
-        unit // 单位（必填）
+        unit, // 单位（必填）
+        unit_mismatch_reviewed
       ]);
       const test_item_id = r.insertId;
 
