@@ -145,8 +145,8 @@ router.get('/', async (req, res, next) => {
         price_id: ti.price_id || null,
         test_code: ti.test_code || null,
         test_condition: ti.detail_name || '',
-        price_note: ti.price_note || '',
-        discount_rate: ti.discount_rate || null,
+        price_note: ti.price_note ?? '',
+        discount_rate: ti.discount_rate ?? null,
         group_id: ti.group_id || null,
         assignment_accounts: assignment_accounts,
         arrival_mode: ti.arrival_mode || '',
@@ -649,7 +649,7 @@ router.post('/', async (req, res, next) => {
         (priceInfo && priceInfo.group_id) || item.group_id || null,
         item.quantity || 1,
         unit_price,
-        item.discount_rate || null,
+        item.discount_rate != null && String(item.discount_rate).trim() !== '' ? item.discount_rate : null,
         final_unit_price,
         line_total,
         0,
@@ -661,7 +661,7 @@ router.post('/', async (req, res, next) => {
         item.original_no || null,
         item.sample_preparation || null,
         item.note || null,
-        item.price_note || null,
+        item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null,
         (item.arrival_mode === 'mail'
           ? 'delivery'
           : (item.arrival_mode || (payload?.arrivalInfo?.arrivalMethod === 'mail'
@@ -824,7 +824,10 @@ router.put('/:id', async (req, res, next) => {
         if (item.final_unit_price !== undefined) { setFragments.push(`final_unit_price = ?`); vals.push(item.final_unit_price); }
         if (item.line_total !== undefined) { setFragments.push(`line_total = ?`); vals.push(item.line_total); }
         if (item.note !== undefined) { setFragments.push(`note = ?`); vals.push(item.note ?? null); }
-        if (item.price_note !== undefined) { setFragments.push(`price_note = ?`); vals.push(item.price_note ?? null); }
+        if (item.price_note !== undefined) {
+          setFragments.push(`price_note = ?`);
+          vals.push(item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null);
+        }
         if (item.arrival_mode !== undefined) { setFragments.push(`arrival_mode = ?`); vals.push(item.arrival_mode ?? null); }
         if (item.sample_arrival_status !== undefined) { setFragments.push(`sample_arrival_status = ?`); vals.push(item.sample_arrival_status ?? null); }
         if (item.service_urgency !== undefined) { setFragments.push(`service_urgency = ?`); vals.push(item.service_urgency ?? 'normal'); }
