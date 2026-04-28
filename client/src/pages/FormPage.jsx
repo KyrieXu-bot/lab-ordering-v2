@@ -736,11 +736,19 @@ function FormPage() {
 
     for (let i = 0; i < formData.testItems.length; i++) {
       const ti = formData.testItems[i];
+      const businessQuote = ti.price_note != null ? String(ti.price_note).trim() : '';
+      const discountRate = ti.discount_rate != null ? String(ti.discount_rate).trim() : '';
       if (!ti.sampleName) { alert(`提交失败！第${i + 1}行：样品名称为必填项`); return; }
       if (!ti.material) { alert(`提交失败！第${i + 1}行：材质为必填项`); return; }
       if (!ti.sampleType) { alert(`提交失败！第${i + 1}行：样品状态为必填项`); return; }
       if (!ti.test_item) { alert(`提交失败！第${i + 1}行：检测项目为必填项`); return; }
       if (!ti.test_method) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
+      if (businessQuote === '') { alert(`提交失败！第${i + 1}行：业务报价为必填项`); return; }
+      if (discountRate === '') { alert(`提交失败！第${i + 1}行：折扣为必填项`); return; }
+      if (Number(discountRate) < 0 || Number(discountRate) > 100) {
+        alert(`提交失败！第${i + 1}行：折扣必须在0-100之间`);
+        return;
+      }
       if (!ti.quantity) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
       if (!ti.unit || String(ti.unit).trim() === '') { alert(`提交失败！第${i + 1}行：单位为必填项`); return; }
       if (!ti.department_id) { alert(`提交失败！第${i + 1}行：部门为必填项`); return; }
@@ -817,8 +825,10 @@ function FormPage() {
         unit: item.unit || '',
         unit_price: item.unit_price != null && String(item.unit_price).trim() !== '' ? item.unit_price : null,
         department_id: item.department_id, note: item.note || '',
-        price_id: item.price_id, test_code: item.test_code, test_condition: item.test_condition, price_note: item.price_note, group_id: item.group_id,
-        discount_rate: item.discount_rate || null,
+        price_id: item.price_id, test_code: item.test_code, test_condition: item.test_condition,
+        price_note: item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null,
+        group_id: item.group_id,
+        discount_rate: item.discount_rate != null && String(item.discount_rate).trim() !== '' ? item.discount_rate : null,
         arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode,
         sample_arrival_status: item.sample_arrival_status || 'arrived',
         service_urgency: item.service_urgency || 'normal',
@@ -1415,9 +1425,9 @@ function FormPage() {
                 <th>材质<span style={{ color: 'red' }}>*</span><br/>Material</th>
                 <th>样品状态<span style={{ color: 'red' }}>*</span><br/>Sample Status</th>
                 <th>样品原号<br/>Sample No.</th>
-                <th>价格备注<br/>Price Note</th>
+                <th>业务报价<span style={{ color: 'red' }}>*</span><br/>Business Quote</th>
                 <th>单位<span style={{ color: 'red' }}>*</span><br/>Unit</th>
-                <th>折扣<br/>Discount(%)</th>
+                <th>折扣<span style={{ color: 'red' }}>*</span><br/>Discount(%)</th>
                 <th>检测项目<span style={{ color: 'red' }}>*</span><br/>Test Items</th>
                 <th>检测标准<span style={{ color: 'red' }}>*</span><br/>Methods</th>
                 <th>到达方式<br/>Arrival</th>
@@ -1464,7 +1474,7 @@ function FormPage() {
                           alert('价格备注只能输入纯数字！');
                         }
                       }} 
-                      placeholder="可选"
+                      placeholder="必填"
                     />
                   </td>
                   <td>
