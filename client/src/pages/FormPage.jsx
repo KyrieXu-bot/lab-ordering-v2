@@ -71,7 +71,8 @@ function FormPage() {
     { department_id: 2, department_name: '物化性能测试实验室' },
     { department_id: 3, department_name: '力学性能测试实验室' },
     { department_id: 5, department_name: '委外' },
-    { department_id: 6, department_name: '化学分析实验室' }
+    { department_id: 6, department_name: '化学分析实验室' },
+    { department_id: 7, department_name: '技术支持' }
   ];
   const navigate = useNavigate();
 
@@ -1582,7 +1583,7 @@ function FormPage() {
                   </td>
                   <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
                   {item.price_id
-                    ? <td className='selected-price'><span>{departments.find(dept => dept.department_id === item.department_id)?.department_name || '未知部门'}</span></td>
+                    ? <td className='selected-price'><span>{departments.find(dept => String(dept.department_id) === String(item.department_id))?.department_name || '未知部门'}</span></td>
                     : <td><select value={item.department_id || ""} onChange={e => handleDepartmentChange(index, e.target.value)}>
                         <option value="" disabled>---请选择---</option>
                         {departments.map(dept => (<option key={dept.department_id} value={dept.department_id}>{dept.department_name}</option>))}
