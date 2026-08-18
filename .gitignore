@@ -97,3 +97,5 @@ Thumbs.db
 # 构建输出
 dist/
 build/
+server/private_uploads/
+server/tmp/

@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const { requireAuth, restrictNonRequestWrites } = require('./middleware/auth');
+const { router: authRouter } = require('./routes/auth');
 
 const { router: ordersRouter } = require('./routes/orders');
 const { router: testItemsRouter } = require('./routes/testItems');
@@ -16,6 +18,7 @@ const { router: formRouter } = require('./routes/form');
 const { router: commissionRouter } = require('./routes/commission');
 const { router: documentsRouter } = require('./routes/documents');
 const { router: templatesRouter } = require('./routes/templates');
+const { router: orderRequestsRouter } = require('./routes/orderRequests');
 
 const app = express();
 app.use(cors());
@@ -23,6 +26,11 @@ app.use(helmet());
 app.use(express.json());
 app.use(morgan('dev'));
 app.use('/uploads', express.static(require('path').join(__dirname, '..', 'uploads')));
+
+app.get('/api/health', (_, res) => res.json({ ok: true }));
+app.use('/api/auth', authRouter);
+app.use('/api', requireAuth);
+app.use('/api', restrictNonRequestWrites);
 
 app.use('/api/orders', ordersRouter);
 app.use('/api/test-items', testItemsRouter);
@@ -36,8 +44,12 @@ app.use('/api/form', formRouter);
 app.use('/api/commission', commissionRouter);
 app.use('/api/documents', documentsRouter);
 app.use('/api/templates', templatesRouter);
+app.use('/api/order-requests', orderRequestsRouter);
 
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(error.status || 500).json({ message: error.status ? error.message : '服务器处理失败' });
+});
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log('[server] http://localhost:'+port));

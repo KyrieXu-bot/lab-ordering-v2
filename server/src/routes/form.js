@@ -2,7 +2,7 @@ const express = require('express');
 const pool  = require('../db');
 const router = express.Router();
 
-// 委托方选择列表：只查询 commissioners 表
+// 委托方选择列表：所有启用的委托方，不按登录人或 owner_user_id 过滤
 router.get('/customers', async (req, res, next) => {
   try {
     const { customerNameTerm = '', contactNameTerm = '', contactPhoneTerm = '' } = req.query;
@@ -21,15 +21,14 @@ router.get('/customers', async (req, res, next) => {
          AND (m.commissioner_name LIKE ?)
          AND (m.contact_name LIKE ? OR ? = '')
          AND (m.contact_phone LIKE ? OR ? = '')
-       ORDER BY m.commissioner_id DESC
-       LIMIT 200`,
+       ORDER BY m.commissioner_id DESC`,
       [`%${customerNameTerm}%`, `%${contactNameTerm}%`, contactNameTerm, `%${contactPhoneTerm}%`, contactPhoneTerm]
     );
     res.json(rows);
   } catch (e) { next(e); }
 });
 
-// 付款方选择列表：payers + customers
+// 付款方选择列表：所有启用的付款方，不按登录人或 owner_user_id 过滤
 router.get('/payers', async (req, res, next) => {
   try {
     const { payerNameTerm = '', payerContactNameTerm = '', payerContactPhoneTerm = '' } = req.query;
@@ -48,8 +47,7 @@ router.get('/payers', async (req, res, next) => {
          AND (c.customer_name LIKE ?)
          AND (p.contact_name LIKE ? OR ? = '')
          AND (p.contact_phone LIKE ? OR ? = '')
-       ORDER BY p.payer_id DESC
-       LIMIT 200`,
+       ORDER BY p.payer_id DESC`,
       [`%${payerNameTerm}%`, `%${payerContactNameTerm}%`, payerContactNameTerm, `%${payerContactPhoneTerm}%`, payerContactPhoneTerm]
     );
     res.json(rows);

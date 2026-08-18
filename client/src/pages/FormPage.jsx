@@ -14,12 +14,97 @@ import {
   generateOrderTemplate,
   generateProcessTemplate,
   searchOrders,
-  checkOrder
+  checkOrder,
+  getOrderRequest,
+  createOrderRequest,
+  approveOrderRequest,
+  returnOrderRequest
 } from '../api/api';
 import { useNavigate } from 'react-router-dom';
+import { getSession } from '../auth';
 import '../css/Form.css'
 
-function FormPage() {
+function buildRequestTemplateData(commissionData, context) {
+  const { selectedCustomer, selectedPayer, salesName, salesEmail, salesPhone } = context;
+  const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
+  const reportTypes = commissionData.reportInfo.type || [];
+  const seals = commissionData.orderInfo.report_seals || [];
+  return {
+    serviceType1Symbol: '☑', serviceType2Symbol: '☐', serviceType3Symbol: '☐',
+    reportSeals1Symbol: seals.includes('normal') ? '☑' : '☐',
+    reportSeals2Symbol: seals.includes('cnas') ? '☑' : '☐',
+    reportSeals3Symbol: seals.includes('cma') ? '☑' : '☐',
+    delivery_days_after_receipt: commissionData.orderInfo.delivery_days_after_receipt || '',
+    sample_shipping_address: commissionData.orderInfo.sample_shipping_address || '',
+    total_price: commissionData.orderInfo.total_price || '',
+    order_num: '',
+    other_requirements: commissionData.orderInfo.other_requirements || '',
+    subcontractingNotAcceptedSymbol: commissionData.orderInfo.subcontracting_not_accepted ? '☑' : '☐',
+    invoiceType1Symbol: '☑', invoiceType2Symbol: '☐',
+    reportContent1Symbol: reportTypes.includes(1) ? '☑' : '☐',
+    reportContent2Symbol: reportTypes.includes(2) ? '☑' : '☐',
+    reportContent3Symbol: reportTypes.includes(3) ? '☑' : '☐',
+    reportContent4Symbol: reportTypes.includes(4) ? '☑' : '☐',
+    reportContent5Symbol: reportTypes.includes(5) ? '☑' : '☐',
+    reportContent6Symbol: reportTypes.includes(6) ? '☑' : '☐',
+    paperReportType1Symbol: commissionData.reportInfo.paper_report_shipping_type === '1' ? '☑' : '☐',
+    paperReportType2Symbol: commissionData.reportInfo.paper_report_shipping_type === '2' ? '☑' : '☐',
+    paperReportType3Symbol: commissionData.reportInfo.paper_report_shipping_type === '3' ? '☑' : '☐',
+    headerType1Symbol: commissionData.reportInfo.header_type === '1' ? '☑' : '☐',
+    headerType2Symbol: commissionData.reportInfo.header_type === '2' ? '☑' : '☐',
+    reportForm1Symbol: commissionData.reportInfo.format_type === '1' ? '☑' : '☐',
+    reportForm2Symbol: commissionData.reportInfo.format_type === '2' ? '☑' : '☐',
+    report_additional_info: commissionData.reportInfo.report_additional_info || '',
+    header_additional_info: commissionData.reportInfo.header_other || '',
+    sampleHandlingType1Symbol: commissionData.sampleHandling.handling_type === '1' ? '☑' : '☐',
+    sampleHandlingType2Symbol: commissionData.sampleHandling.handling_type === '2' ? '☑' : '☐',
+    sampleHandlingType3Symbol: commissionData.sampleHandling.handling_type === '3' ? '☑' : '☐',
+    sampleHandlingType4Symbol: commissionData.sampleHandling.handling_type === '4' ? '☑' : '☐',
+    returnOptionSameSymbol: commissionData.sampleHandling.return_info?.returnAddressOption === 'same' ? '☑' : '☐',
+    returnOptionOtherSymbol: commissionData.sampleHandling.return_info?.returnAddressOption === 'other' ? '☑' : '☐',
+    return_address: commissionData.sampleHandling.return_info?.returnAddress || '',
+    hazardSafetySymbol: commissionData.sampleRequirements.hazards.includes('Safety') ? '☑' : '☐',
+    hazardFlammabilitySymbol: commissionData.sampleRequirements.hazards.includes('Flammability') ? '☑' : '☐',
+    hazardIrritationSymbol: commissionData.sampleRequirements.hazards.includes('Irritation') ? '☑' : '☐',
+    hazardVolatilitySymbol: commissionData.sampleRequirements.hazards.includes('Volatility') ? '☑' : '☐',
+    hazardFragileSymbol: commissionData.sampleRequirements.hazards.includes('Fragile') ? '☑' : '☐',
+    hazardOtherSymbol: commissionData.sampleRequirements.hazards.includes('Other') ? '☑' : '☐',
+    hazard_other: commissionData.sampleRequirements.hazardOther || '',
+    magnetismNonMagneticSymbol: commissionData.sampleRequirements.magnetism === 'Non-magnetic' ? '☑' : '☐',
+    magnetismWeakMagneticSymbol: commissionData.sampleRequirements.magnetism === 'Weak-magnetic' ? '☑' : '☐',
+    magnetismStrongMagneticSymbol: commissionData.sampleRequirements.magnetism === 'Strong-magnetic' ? '☑' : '☐',
+    magnetismUnknownSymbol: commissionData.sampleRequirements.magnetism === 'Unknown' ? '☑' : '☐',
+    conductivityConductorSymbol: commissionData.sampleRequirements.conductivity === 'Conductor' ? '☑' : '☐',
+    conductivitySemiconductorSymbol: commissionData.sampleRequirements.conductivity === 'Semiconductor' ? '☑' : '☐',
+    conductivityInsulatorSymbol: commissionData.sampleRequirements.conductivity === 'Insulator' ? '☑' : '☐',
+    conductivityUnknownSymbol: commissionData.sampleRequirements.conductivity === 'Unknown' ? '☑' : '☐',
+    breakableYesSymbol: commissionData.sampleRequirements.breakable === 'yes' ? '☑' : '☐',
+    breakableNoSymbol: commissionData.sampleRequirements.breakable === 'no' ? '☑' : '☐',
+    brittleYesSymbol: commissionData.sampleRequirements.brittle === 'yes' ? '☑' : '☐',
+    brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑' : '☐',
+    sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone,
+    testItems: commissionData.testItems.map((item, index) => ({
+      ...item, idx: index + 1, material: String(item.material || '').trim(),
+      sampleTypeLabel: sampleTypeMap[item.sample_type] || item.sample_type || '',
+      samplePrepYesSymbol: '☐', samplePrepNoSymbol: '☐'
+    })),
+    customer_name: selectedCustomer?.customer_name || '',
+    customer_address: selectedCustomer?.customer_address || '',
+    customer_contactName: selectedCustomer?.contact_name || '',
+    customer_contactEmail: selectedCustomer?.contact_email || '',
+    customer_contactPhone: selectedCustomer?.contact_phone_num || '',
+    payer_name: selectedPayer?.payer_name || '',
+    payer_address: selectedPayer?.payer_address || '',
+    payer_contactName: selectedPayer?.payer_contact_name || '',
+    payer_contactEmail: selectedPayer?.payer_contact_email || '',
+    payer_contactPhone: selectedPayer?.payer_contact_phone_num || '',
+    payer_bankName: selectedPayer?.bank_name || '',
+    payer_taxNumber: selectedPayer?.tax_number || '',
+    payer_bankAccount: selectedPayer?.bank_account || ''
+  };
+}
+
+function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [showPrefillModal, setShowPrefillModal] = useState(false);
   const [showPayerModal, setShowPayerModal] = useState(false);
@@ -55,6 +140,7 @@ function FormPage() {
 
   // 转单相关状态
   const [isTransferMode, setIsTransferMode] = useState(false);
+  const [prefillOrderNum, setPrefillOrderNum] = useState('');
   const [previousOrderId, setPreviousOrderId] = useState('');
   const [previousOrderSearchTerm, setPreviousOrderSearchTerm] = useState('');
   const [previousOrderSearchResults, setPreviousOrderSearchResults] = useState([]);
@@ -64,6 +150,10 @@ function FormPage() {
   const [selectedPayer, setSelectedPayer] = useState(null);
   const [priceList, setPriceList] = useState([]);
   const [selectedTestIndex, setSelectedTestIndex] = useState(null);
+  const [requestLoading, setRequestLoading] = useState(Boolean(requestId));
+  const [reviewNote, setReviewNote] = useState('');
+  const [submittedRequest, setSubmittedRequest] = useState(null);
+  const [requestMeta, setRequestMeta] = useState(null);
 
   // 静态部门数据（与后端 departments 对应）
   const departments = [
@@ -137,6 +227,47 @@ function FormPage() {
     testItems: [],
     orderNum: '',
   });
+
+  useEffect(() => {
+    if (workflowMode !== 'request') return;
+    const session = getSession();
+    if (session?.user?.username) {
+      setFormData(prev => ({ ...prev, salesPerson: session.user.username }));
+      setSalesName(session.user.name || '');
+    }
+  }, [workflowMode]);
+
+  useEffect(() => {
+    if (!requestId) return;
+    let active = true;
+    getOrderRequest(requestId)
+      .then(({ data }) => {
+        if (!active) return;
+        const packet = data.reviewed_payload || data.submitted_payload || {};
+        const snapshot = packet.formSnapshot || {};
+        if (snapshot.formData) setFormData(snapshot.formData);
+        setSelectedCustomer(snapshot.selectedCustomer || null);
+        setSelectedPayer(snapshot.selectedPayer || null);
+        setIsTransferMode(Boolean(snapshot.isTransferMode));
+        setPreviousOrderId(snapshot.previousOrderId || '');
+        setPreviousOrderSearchTerm(snapshot.previousOrderSearchTerm || snapshot.previousOrderId || '');
+        setSelectedPreviousOrder(snapshot.selectedPreviousOrder || null);
+        setSalesName(snapshot.salesName || '');
+        setSalesEmail(snapshot.salesEmail || '');
+        setSalesPhone(snapshot.salesPhone || '');
+        setReviewNote(data.review_note || '');
+        setRequestMeta({
+          requestNo: data.request_no,
+          status: data.status,
+          applicantName: data.applicant_name,
+          approvedOrderId: data.approved_order_id,
+          reviewNote: data.review_note
+        });
+      })
+      .catch(error => alert(error.response?.data?.message || '申请内容加载失败'))
+      .finally(() => active && setRequestLoading(false));
+    return () => { active = false };
+  }, [requestId]);
 
   const moveTestItem = (from, to) => {
     if (from === to || from == null || to == null) return;
@@ -442,18 +573,19 @@ function FormPage() {
       alert('当前为转单模式，请先关闭转单功能再使用预填功能！');
       return;
     }
-    
-    if (!formData.orderNum) { alert('请先输入委托单号'); return; }
+
+    const sourceOrderNum = prefillOrderNum.trim();
+    if (!sourceOrderNum) { alert('请先输入需要预填的历史委托单号'); return; }
     
     // 检查委托单号是否包含特殊字符
     const specialChars = /[\s_.,\/?\-=]/;
-    if (specialChars.test(formData.orderNum)) {
+    if (specialChars.test(sourceOrderNum)) {
       alert('委托单号不能包含空格、下划线、点号、逗号、斜杠、问号、连字符或等号等特殊字符！\nTask number cannot contain special characters like spaces, underscores, dots, commas, slashes, question marks, hyphens or equals signs!');
       return;
     }
     
     try {
-      const { data } = await getCommission(formData.orderNum);
+      const { data } = await getCommission(sourceOrderNum);
       console.log("data", data);
       setSelectedCustomer(data.customer);
       setSelectedPayer(data.payer);
@@ -520,7 +652,7 @@ function FormPage() {
   const addTestItem = () => {
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
-      test_item: '', test_method: '', quantity: '', unit: '', note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
+      test_item: '', test_method: '', quantity: '', unit: '', note: '', flow_note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
       arrival_mode: '', sample_arrival_status: '', seq_no: ''
     }]}));
   };
@@ -640,8 +772,31 @@ function FormPage() {
       '电子版+纸质版报告': 5,
       '中英文对照报告Chinese-English bilingual report': 6
     }
-    const updatedReportType = checked ? [...formData.reportType, reportOptions[value]] : formData.reportType.filter(item => item !== reportOptions[value]);
-    setFormData({ ...formData, reportType: updatedReportType, showPaperReport: updatedReportType.includes(4) || updatedReportType.includes(5) });
+    const code = reportOptions[value];
+    setFormData(prev => {
+      let updated = [...prev.reportType];
+      if (code === 1) {
+        updated = checked ? [1] : updated.filter(item => item !== 1);
+      } else if (code === 4) {
+        updated = checked ? [4] : updated.filter(item => item !== 4);
+      } else if (code === 5) {
+        updated = checked
+          ? [...updated.filter(item => ![1, 4].includes(item)), 5]
+          : updated.filter(item => ![2, 3, 5, 6].includes(item));
+      } else {
+        updated = updated.filter(item => ![1, 2, 3, 4, 6].includes(item));
+        if (checked) updated.push(code);
+        if (!updated.includes(5)) updated.push(5);
+      }
+      updated = [...new Set(updated)];
+      return {
+        ...prev,
+        reportType: updated,
+        showPaperReport: updated.includes(5),
+        paperReportShippingType: updated.includes(5) ? prev.paperReportShippingType : '',
+        reportAdditionalInfo: updated.includes(5) ? prev.reportAdditionalInfo : ''
+      };
+    });
   };
 
   const handleReportSealsChange = (e) => {
@@ -690,7 +845,14 @@ function FormPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!window.confirm('请确认填写的信息是否正确，确认无误再提交')) return;
+    if (workflowMode === 'review' && !String(formData.orderNum || '').trim()) {
+      alert('审批通过前必须填写正式委托单号');
+      return;
+    }
+    const confirmText = workflowMode === 'review'
+      ? '确认审批通过并生成正式委托单吗？'
+      : '请确认填写的信息是否正确，确认无误再提交审批';
+    if (!window.confirm(confirmText)) return;
     
     // 转单模式验证
     if (isTransferMode) {
@@ -733,6 +895,24 @@ function FormPage() {
     }
     if (!selectedPayer) { alert('提交失败！请先选择付款方'); return; }
     if (formData.reportType.length === 0) { alert('提交失败！报告文档为必填项，请至少选择一项'); return; }
+    const languageTypes = formData.reportType.filter(type => [2, 3, 6].includes(type));
+    const hasNoReport = formData.reportType.includes(1);
+    const hasElectronicOnly = formData.reportType.includes(4);
+    const hasPrintedReport = formData.reportType.includes(5);
+    if (!hasNoReport && !hasElectronicOnly && !hasPrintedReport) {
+      alert('提交失败！请选择报告交付形式'); return;
+    }
+    if (hasPrintedReport && languageTypes.length !== 1) {
+      alert('提交失败！选择“电子版+纸质版报告”后，中文、英文、中英文对照报告必须三选一'); return;
+    }
+    if (hasPrintedReport && !formData.paperReportShippingType) {
+      alert('提交失败！请选择纸质版报告寄送地址'); return;
+    }
+    if (hasPrintedReport && formData.paperReportShippingType === '3' && !formData.reportAdditionalInfo.trim()) {
+      alert('提交失败！请填写其他寄送地址、收件人和电话'); return;
+    }
+    if (!hasNoReport && !formData.reportHeader) { alert('提交失败！报告抬头为必填项'); return; }
+    if (!hasNoReport && !formData.reportForm) { alert('提交失败！报告对应方式为必填项'); return; }
     if (formData.testItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
 
     for (let i = 0; i < formData.testItems.length; i++) {
@@ -822,6 +1002,7 @@ function FormPage() {
         sample_type: item.sampleType === '5' ? item.sampleTypeCustom?.trim() : item.sampleType,
         original_no: item.original_no || '', test_item: item.test_item, test_method: item.test_method,
         sample_preparation: item.sample_preparation,
+        flow_note: item.flow_note || '',
         quantity: item.quantity,
         unit: item.unit || '',
         unit_price: item.unit_price != null && String(item.unit_price).trim() !== '' ? item.unit_price : null,
@@ -835,8 +1016,53 @@ function FormPage() {
         service_urgency: item.service_urgency || 'normal',
         seq_no: item.seq_no || null
       })),
-      assignmentInfo: { account: formData.salesPerson }
+      assignmentInfo: {
+        account: workflowMode === 'request'
+          ? (getSession()?.user?.username || formData.salesPerson)
+          : formData.salesPerson
+      }
     };
+
+    const requestTemplateData = buildRequestTemplateData(commissionData, {
+      selectedCustomer, selectedPayer, salesName, salesEmail, salesPhone
+    });
+    const requestPacket = {
+      commissionData,
+      templateData: requestTemplateData,
+      formSnapshot: {
+        formData,
+        selectedCustomer,
+        selectedPayer,
+        isTransferMode,
+        previousOrderId,
+        previousOrderSearchTerm,
+        selectedPreviousOrder,
+        salesName,
+        salesEmail,
+        salesPhone
+      }
+    };
+
+    if (workflowMode === 'request') {
+      try {
+        const response = await createOrderRequest(requestPacket);
+        setSubmittedRequest(response.data);
+      } catch (error) {
+        alert(error.response?.data?.message || '申请提交失败，请重试');
+      }
+      return;
+    }
+
+    if (workflowMode === 'review') {
+      try {
+        const response = await approveOrderRequest(requestId, requestPacket, reviewNote);
+        alert(`审批通过，正式委托单号：${response.data.orderNum}`);
+        navigate('/');
+      } catch (error) {
+        alert(error.response?.data?.message || '审批失败，请重试');
+      }
+      return;
+    }
 
     try {
       const response = await createCommission(commissionData);
@@ -1089,14 +1315,110 @@ function FormPage() {
   const handlePrefillYes = (payer) => { setSelectedPayer(payer); setShowCustomerModal(false); setShowPrefillModal(false); };
   const handlePrefillNo = () => { setShowCustomerModal(false); setShowPrefillModal(false); };
 
+  const handleReturnRequest = async () => {
+    const note = reviewNote.trim();
+    if (!note) return alert('请先填写退回原因');
+    if (!window.confirm('确认将该申请退回给业务员吗？')) return;
+    try {
+      await returnOrderRequest(requestId, note);
+      alert('申请已退回');
+      navigate('/');
+    } catch (error) {
+      alert(error.response?.data?.message || '退回失败');
+    }
+  };
+
+  if (requestLoading) return <div className="workflow-loading">正在载入申请内容…</div>;
+  const isReadOnly = workflowMode === 'view';
+  const toolbarTitle = workflowMode === 'review'
+    ? '审批委托申请'
+    : workflowMode === 'view'
+      ? '查看委托申请'
+      : workflowMode === 'direct'
+        ? '自行创建委托单'
+        : '新建委托申请';
+  const toolbarHint = workflowMode === 'review'
+    ? '核对并修正表单，确认后生成正式委托单'
+    : workflowMode === 'view'
+      ? '完整表单只读展示，内容不可修改'
+      : workflowMode === 'direct'
+        ? '直接创建正式委托单，可使用实验室转单功能'
+        : '填写完成后将提交给开单员审批';
+  const requestStatusLabel = requestMeta
+    ? ({ submitted: '待审批', approved: '已通过', returned: '已退回', withdrawn: '已撤回' }[requestMeta.status] || requestMeta.status)
+    : '';
+
   return (
-    <div>
+    <div className={`workflow-form-page${isReadOnly ? ' workflow-readonly-mode' : ''}`}>
+      <div className="workflow-toolbar">
+        <button type="button" onClick={() => navigate('/')}>← 返回列表</button>
+        <div>
+          <strong>{toolbarTitle}</strong>
+          <span>{toolbarHint}</span>
+        </div>
+      </div>
+      {isReadOnly && requestMeta && (
+        <div className="workflow-readonly-summary">
+          <div><span>申请编号</span><strong>{requestMeta.requestNo}</strong></div>
+          <div><span>申请人</span><strong>{requestMeta.applicantName || '—'}</strong></div>
+          <div><span>申请状态</span><strong>{requestStatusLabel}</strong></div>
+          <div><span>正式委托单号</span><strong>{requestMeta.approvedOrderId || '尚未生成'}</strong></div>
+          {requestMeta.reviewNote && <div className="readonly-review-note"><span>审核意见</span><strong>{requestMeta.reviewNote}</strong></div>}
+        </div>
+      )}
+      {workflowMode === 'review' && (
+        <div className="review-note-panel">
+          <label className="review-order-number">正式委托单号<span style={{ color: 'red' }}> *</span>
+            <input type="text" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="审批通过前必须填写" />
+          </label>
+          <label>审核备注 / 退回原因
+            <textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="审批通过时可选；退回申请时必填" />
+          </label>
+          <button type="button" onClick={handleReturnRequest}>退回申请</button>
+        </div>
+      )}
       <div className="header-section">
         <img src="/JITRI-logo3.png" alt="logo"></img>
         <h1>集萃检测开单系统</h1>
         <h2>检测委托合同<br/>Testing Application Contract</h2>
       </div>
       <form onSubmit={handleSubmit}>
+        <fieldset className="workflow-form-shell" disabled={isReadOnly}>
+        {(workflowMode === 'direct' || workflowMode === 'request') && (
+          <section className="order-prefill-panel" aria-labelledby="order-prefill-title">
+            <div className="order-prefill-copy">
+              <strong id="order-prefill-title">预填委托单</strong>
+              <span>输入历史委托单号，可将原单信息带入当前表单；不会作为本次正式委托单号提交。</span>
+            </div>
+            <div className="order-prefill-action">
+              <input
+                type="text"
+                value={prefillOrderNum}
+                onChange={(event) => setPrefillOrderNum(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handlePrefill();
+                  }
+                }}
+                placeholder="请输入历史委托单号"
+                aria-label="预填委托单号"
+                disabled={workflowMode === 'direct' && isTransferMode}
+              />
+              <button
+                type="button"
+                onClick={handlePrefill}
+                disabled={workflowMode === 'direct' && isTransferMode}
+              >
+                预填表单
+              </button>
+            </div>
+            {workflowMode === 'direct' && isTransferMode && (
+              <small>转单模式请使用下方“旧单号”检索，系统会按转单流程自动带入信息。</small>
+            )}
+          </section>
+        )}
+        {workflowMode === 'direct' && (<>
         <div style={{ marginBottom: '16px' }}>
           <button
             type="button"
@@ -1291,12 +1613,12 @@ function FormPage() {
           </div>
         ) : (
           <>
-            <label htmlFor="orderNum">任务编号 Task number:
-              <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="请输入委托单号或留空自动生成" />
+            <label htmlFor="orderNum">新委托单号 New Order Number（留空自动生成）:
+              <input type="text" id="orderNum" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="留空将自动生成新单号" />
             </label>
-            <button type="button" onClick={handlePrefill} style={{ height: 32 }}>预填</button>
           </>
         )}
+        </>)}
         <h3>委托方信息 Applicant Information&nbsp;<span style={{ color: 'red' }}>*</span></h3>
         <div className="block">
           <button type="button" onClick={() => setShowCustomerModal(true)}>选择委托方</button>
@@ -1356,35 +1678,57 @@ function FormPage() {
         {/* 样品到达信息移动到每个检测项目行内 */}
 
         <h3>报告要求 Report Requirements</h3>
-        <fieldset>
+        <fieldset className="report-requirements-card">
           <legend>报告文档 Report Content&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-          {Object.keys(reportOptions).map((option) => (
-            <label key={option}>
-              <input type="checkbox" value={option} onChange={(e) => handleReportTypeChange(option, e.target.checked)} checked={formData.reportType.includes(reportOptions[option])} /> {option}
-            </label>
-          ))}
+          <div className="report-row">
+            <div className="report-row-label">报告版式<br/><small>Report version</small></div>
+            <div className="report-row-content report-version-content">
+              <div className="report-version-option">
+                <label><input type="checkbox" onChange={(e) => handleReportTypeChange('测试图片或数据汇总(无需测试报告) Test pictures or data summaries(No test report)', e.target.checked)} checked={formData.reportType.includes(1)} />测试图片或数据汇总（无需测试报告） <span>Test pictures or data summaries (No test report)</span></label>
+              </div>
+              <div className="report-version-option report-delivery-section">
+                <div className="report-subsection-title">交付形式 <small>Delivery format</small></div>
+                <div className="report-inline-options">
+                  <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('仅电子版报告', true)} checked={formData.reportType.includes(4)} />仅电子版报告 <span>E-report only</span></label>
+                  <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('电子版+纸质版报告', true)} checked={formData.reportType.includes(5)} />电子版+纸质版报告 <span>Electronic + Printed report</span></label>
+                </div>
+                {formData.reportType.includes(5) && (
+                  <div className="report-language-options">
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中文报告 Chinese report', true)} checked={formData.reportType.includes(2)} />中文报告 <span>Chinese report</span></label>
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('英文报告 English report', true)} checked={formData.reportType.includes(3)} />英文报告 <span>English report</span></label>
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中英文对照报告Chinese-English bilingual report', true)} checked={formData.reportType.includes(6)} />中英文对照报告 <span>Chinese-English bilingual report</span></label>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {!formData.reportType.includes(1) && (
+            <>
+              <div className="report-row">
+                <div className="report-row-label">报告标识章<br/><small>Report seals</small></div>
+                <div className="report-row-content report-inline-options">
+                  <label><input type="checkbox" value="normal" checked={formData.reportSeals.includes('normal')} onChange={handleReportSealsChange} />普通报告 <span>Normal report</span></label>
+                  <label><input type="checkbox" value="cnas" checked={formData.reportSeals.includes('cnas')} onChange={handleReportSealsChange} />CNAS</label>
+                  <label><input type="checkbox" value="cma" checked={formData.reportSeals.includes('cma')} onChange={handleReportSealsChange} />CMA</label>
+                </div>
+              </div>
+              {formData.reportType.includes(5) && (
+                <div className="report-row">
+                  <div className="report-row-label">纸质版寄送地址<br/><small>Mailing address</small></div>
+                  <div className="report-row-content report-mailing-options">
+                    <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} />邮寄到委托方 <span>To the applicant</span></label>
+                    <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} />邮寄到付款方 <span>To the payer</span></label>
+                    <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} />其他 <span>Others</span></label>
+                    {formData.paperReportShippingType === '3' && <input className="report-address-input" type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} placeholder="请输入地址、收件人和电话" />}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </fieldset>
 
         {!(formData.reportType.length === 1 && formData.reportType.includes(1)) && (<>
-          <fieldset>
-            <legend>报告标识章 Report Seals</legend>
-            <label style={{ marginRight: 12 }}><input type="checkbox" value="normal" checked={formData.reportSeals.includes('normal')} onChange={handleReportSealsChange} />普通报告</label>
-            <label style={{ marginRight: 12 }}><input type="checkbox" value="cnas" checked={formData.reportSeals.includes('cnas')} onChange={handleReportSealsChange} />CNAS</label>
-            <label><input type="checkbox" value="cma" checked={formData.reportSeals.includes('cma')} onChange={handleReportSealsChange} />CMA</label>
-          </fieldset>
-
-          <fieldset>
-            <legend>纸质版报告寄送地址 Paper delivery address</legend>
-            <label><input type="radio" name="paperReportShippingType" value="1" onClick={() => handleRadioClick('paperReportShippingType', '1')} checked={formData.paperReportShippingType === '1'} readOnly /> 邮寄到委托方</label>
-            <label><input type="radio" name="paperReportShippingType" value="2" onClick={() => handleRadioClick('paperReportShippingType', '2')} checked={formData.paperReportShippingType === '2'} readOnly /> 邮寄到付款方</label>
-            <label><input type="radio" name="paperReportShippingType" value="3" onClick={() => handleRadioClick('paperReportShippingType', '3')} checked={formData.paperReportShippingType === '3'} readOnly /> 其他</label>
-            {formData.paperReportShippingType === '3' && (
-              <label>请输入地址、收件人和电话:
-                <input type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} />
-              </label>
-            )}
-          </fieldset>
-
           <fieldset>
             <legend>报告抬头 Report Header&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportHeaderOptions).map(option => (
@@ -1398,7 +1742,7 @@ function FormPage() {
           </fieldset>
 
           <fieldset>
-            <legend>报告版式 Report Format&nbsp;<span style={{ color: 'red' }}>*</span></legend>
+            <legend>报告对应方式 Report Mapping&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportFormOptions).map(option => (
               <label key={option}><input type="radio" name="reportForm" value={reportFormOptions[option]} onClick={() => handleRadioClick('reportForm', String(reportFormOptions[option]))} checked={formData.reportForm === String(reportFormOptions[option])} readOnly /> {option}</label>
             ))}
@@ -1433,9 +1777,11 @@ function FormPage() {
                 <th>检测标准<span style={{ color: 'red' }}>*</span><br/>Methods</th>
                 <th>到达方式<br/>Arrival</th>
                 <th>是否到达<br/>Arrived</th>
-                <th>流转顺序<br/>Seq No</th>
+                {workflowMode !== 'request' && <th>流转顺序<br/>Seq No</th>}
                 <th>服务加急<br/>Urgency</th>
-                <th>制样<br/>Sample preparation</th>
+                {workflowMode === 'direct'
+                  ? <th>制样<br/>Sample preparation</th>
+                  : <th className="flow-note-col">流转备注<br/>Flow note</th>}
                 <th>数量<span style={{ color: 'red' }}>*</span><br/>Qty</th>
                 <th>所属部门<span style={{ color: 'red' }}>*</span></th>
                 <th>备注<br/>Remarks</th>
@@ -1554,7 +1900,7 @@ function FormPage() {
                       /> 否
                     </label>
                   </td>
-                  <td>
+                  {workflowMode !== 'request' && <td>
                     <select 
                       value={item.seq_no === '' || item.seq_no == null ? '' : String(item.seq_no)} 
                       onChange={e => handleTestItemChange(index, 'seq_no', e.target.value === '' ? '' : Number(e.target.value))}
@@ -1566,7 +1912,7 @@ function FormPage() {
                       <option value="3">3</option>
                       <option value="4">4</option>
                     </select>
-                  </td>
+                  </td>}
                   <td>
                     <select value={item.service_urgency || 'normal'} onChange={e => handleTestItemChange(index, 'service_urgency', e.target.value)}>
                       {serviceUrgencyOptions.map(opt => (
@@ -1574,13 +1920,13 @@ function FormPage() {
                       ))}
                     </select>
                   </td>
-                  <td>
+                  {workflowMode === 'direct' ? <td>
                     <select value={item.sample_preparation != null ? String(item.sample_preparation) : ''} onChange={e => handleTestItemChange(index, 'sample_preparation', e.target.value === '' ? '' : Number(e.target.value))}>
                       <option value="">--请选择--</option>
                       <option value="1">是 Yes</option>
                       <option value="0">否 No</option>
                     </select>
-                  </td>
+                  </td> : <td className="flow-note-col"><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} readOnly={workflowMode === 'review'} placeholder={workflowMode === 'review' ? '业务填写的流转说明' : '填写流转、前处理或顺序要求'} /></td>}
                   <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => String(dept.department_id) === String(item.department_id))?.department_name || '未知部门'}</span></td>
@@ -1683,7 +2029,9 @@ function FormPage() {
           <label><input type="radio" name="sampleSolutionType" value="4" onClick={() => handleRadioClick('sampleSolutionType', '4')} checked={formData.sampleSolutionType === '4'} readOnly />无剩余样品</label>
         </fieldset>
 
-        <button type="submit" className="submit">提交表单并生成Word</button>
+        {!isReadOnly && <button type="submit" className="submit">
+          {workflowMode === 'review' ? '审批通过并生成正式委托单' : workflowMode === 'request' ? '提交审批' : '提交表单并生成Word'}
+        </button>}
 
         {showCustomerModal && (
           <div className="modal">
@@ -1810,8 +2158,7 @@ function FormPage() {
             </div>
           </div>
         )}
-
-
+        </fieldset>
       </form>
 
       {showDownloadModal && (
@@ -1830,6 +2177,19 @@ function FormPage() {
                 setShowDownloadModal(false); 
                 window.location.href = '/'; 
               }}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {submittedRequest && (
+        <div className="modal workflow-success-modal">
+          <div className="modal-content">
+            <div className="success-check">✓</div>
+            <h2>委托申请已提交</h2>
+            <p>申请编号：<strong>{submittedRequest.request_no}</strong></p>
+            <p className="success-hint">申请已进入审批流程。审批通过并取得正式委托单号后，可在首页生成 PDF。</p>
+            <div className="decide-button">
+              <button type="button" className="secondary" onClick={() => navigate('/')}>返回</button>
             </div>
           </div>
         </div>

@@ -1,6 +1,7 @@
 // server/src/routes/commission.js
 const express = require('express');
 const pool = require('../db');
+const { requireReviewer } = require('../middleware/auth');
 const router = express.Router();
 
 /**
@@ -314,10 +315,11 @@ router.get('/', async (req, res, next) => {
  * 创建：按照前端 payload 写入 orders/test_items/assignments
  * POST /api/commission
  */
-router.post('/', async (req, res, next) => {
-  const conn = await pool.getConnection();
+async function createCommissionFromPayload(payload, options = {}) {
+  const ownsConnection = !options.connection;
+  const conn = options.connection || await pool.getConnection();
   try {
-    const payload = req.body;
+    if (ownsConnection) await conn.beginTransaction();
     const customerId = payload.customerId;
     const paymentId  = payload.paymentId; // payer_id
     const assignmentAccount = payload.assignmentInfo?.account || null;
@@ -391,8 +393,6 @@ router.post('/', async (req, res, next) => {
     // 决定 order_id（如果前端有传就校验唯一，不存在则生成 JC + YYMM + seq）
     let order_id = payload?.orderInfo?.order_num || null;
 
-    await conn.beginTransaction();
-
     if (order_id) {
       // 检查重复
       const [[ex]] = await conn.query(`SELECT order_id FROM orders WHERE order_id = ? FOR UPDATE`, [order_id]);
@@ -423,7 +423,7 @@ router.post('/', async (req, res, next) => {
     }
 
     // 创建订单（created_by 暂用 assignmentAccount 或 'LX001'）
-    const created_by = assignmentAccount || 'LX001';
+    const created_by = options.operatorUserId || assignmentAccount || 'LX001';
     const is_transferred = previousOrderId ? 1 : 0;
     const original_order_id = previousOrderId || null;
     
@@ -728,16 +728,25 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    await conn.commit();
+    if (ownsConnection) await conn.commit();
     try { console.log('[commission][POST] committed', { order_id }); } catch (_) {}
-    res.status(201).json({ orderNum: order_id });
+    return { orderNum: order_id };
   } catch (e) {
-    await (conn.rollback().catch(()=>{}));
-    const status = e.status || 500;
-    try { console.error('[commission][POST] error', { message: e.message, status }); } catch (_) {}
-    res.status(status).json({ message: e.message || 'error' });
+    if (ownsConnection) await (conn.rollback().catch(()=>{}));
+    try { console.error('[commission][POST] error', { message: e.message, status: e.status || 500 }); } catch (_) {}
+    throw e;
   } finally {
-    conn.release();
+    if (ownsConnection) conn.release();
+  }
+}
+
+router.post('/', requireReviewer, async (req, res, next) => {
+  try {
+    const result = await createCommissionFromPayload(req.body, { operatorUserId: req.user.user_id });
+    res.status(201).json(result);
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    next(error);
   }
 });
 
@@ -1050,4 +1059,4 @@ router.get('/check-order', async (req, res, next) => {
   }
 });
 
-module.exports = { router };
+module.exports = { router, createCommissionFromPayload };

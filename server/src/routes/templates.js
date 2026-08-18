@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
+const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 
 const router = express.Router();
 
@@ -12,55 +13,7 @@ router.post('/generate-order-template', async (req, res) => {
     const templateData = req.body;
     console.log('收到委托单模板数据，字段数量:', Object.keys(templateData).length);
     
-    // 模板文件路径
-    const templatePath = path.join(__dirname, '..', '..', 'templates', 'order_template.docx');
-    console.log('模板文件路径:', templatePath);
-    
-    // 检查模板文件是否存在
-    try {
-      await fs.access(templatePath);
-      console.log('模板文件存在');
-    } catch (error) {
-      console.error('模板文件不存在:', error);
-      return res.status(404).json({ error: '委托单模板文件不存在' });
-    }
-
-    // 读取模板文件
-    console.log('开始读取模板文件...');
-    const templateBuffer = await fs.readFile(templatePath);
-    console.log('模板文件大小:', templateBuffer.length);
-    
-    if (templateBuffer.length === 0) {
-      throw new Error('模板文件为空');
-    }
-    
-    // 生成文档
-    console.log('开始创建PizZip...');
-    const zip = new PizZip(templateBuffer);
-    console.log('PizZip创建成功');
-    
-    console.log('开始创建Docxtemplater...');
-    const doc = new Docxtemplater(zip);
-    console.log('Docxtemplater创建成功');
-    
-    // 设置数据
-    console.log('开始设置数据...');
-    doc.setData(templateData);
-    console.log('数据设置成功');
-    
-    // 渲染文档
-    console.log('开始渲染文档...');
-    try {
-      doc.render();
-      console.log('文档渲染成功');
-    } catch (renderError) {
-      console.error('文档渲染失败:', renderError);
-      throw new Error(`文档渲染失败: ${renderError.message}`);
-    }
-    
-    // 生成最终文档
-    console.log('开始生成最终文档...');
-    const report = doc.getZip().generate({ type: 'nodebuffer' });
+    const report = await generateOrderTemplateBuffer(templateData);
     console.log('文档生成成功，大小:', report.length);
 
     // 设置响应头（命名：委托单号+客户名称+委托联系人名称）

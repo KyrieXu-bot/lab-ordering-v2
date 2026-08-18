@@ -1,5 +1,35 @@
 import axios from 'axios'
 
+axios.interceptors.request.use((config) => {
+  const session = JSON.parse(localStorage.getItem('ordering_session') || 'null')
+  if (session?.token) config.headers.Authorization = `Bearer ${session.token}`
+  return config
+})
+
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401 && !window.location.pathname.includes('/login') && !window.location.pathname.includes('/__preview/')) {
+      localStorage.removeItem('ordering_session')
+      window.location.href = '/login'
+    }
+    return Promise.reject(error)
+  }
+)
+
+export const login = (username, password) => axios.post('/api/auth/login', { username, password })
+export const getOrderRequests = (params = {}) => axios.get('/api/order-requests', { params })
+export const getOrderRequest = (id) => axios.get(`/api/order-requests/${id}`)
+export const createOrderRequest = (payload) => axios.post('/api/order-requests', { payload })
+export const withdrawOrderRequest = (id) => axios.post(`/api/order-requests/${id}/withdraw`)
+export const returnOrderRequest = (id, note) => axios.post(`/api/order-requests/${id}/return`, { note })
+export const approveOrderRequest = (id, payload, note = '') =>
+  axios.post(`/api/order-requests/${id}/approve`, { payload, note })
+export const generateOrderRequestPdf = (id) =>
+  axios.post(`/api/order-requests/${id}/generate-pdf`)
+export const downloadOrderRequestAttachment = (id) =>
+  axios.get(`/api/order-requests/${id}/attachment`, { responseType: 'blob' })
+
 export const getCommission = (orderNum) => axios.get('/api/commission', { params: { orderNum } })
 export const createCommission = (data) => axios.post('/api/commission', data)
 
