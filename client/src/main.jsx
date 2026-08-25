@@ -8,6 +8,7 @@ import ReviewerDashboard from './pages/ReviewerDashboard.jsx'
 import NewRequestPage from './pages/NewRequestPage.jsx'
 import ReviewRequestPage from './pages/ReviewRequestPage.jsx'
 import RequestDetail from './pages/RequestDetail.jsx'
+import EditRequestPage from './pages/EditRequestPage.jsx'
 import ReviewerCreateOrderPage from './pages/ReviewerCreateOrderPage.jsx'
 
 function Protected({ children, reviewer }) {
@@ -30,6 +31,7 @@ function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/" element={<Home />} />
       <Route path="/requests/new" element={<Protected reviewer={false}><NewRequestPage /></Protected>} />
+      <Route path="/requests/:id/edit" element={<Protected reviewer={false}><EditRequestPage /></Protected>} />
       <Route path="/requests/:id" element={<Protected><RequestDetail /></Protected>} />
       <Route path="/review/:id" element={<Protected reviewer><ReviewRequestPage /></Protected>} />
       <Route path="/orders/new" element={<Protected reviewer><ReviewerCreateOrderPage /></Protected>} />

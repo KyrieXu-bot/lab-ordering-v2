@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   getCommission,
   createCommission,
@@ -9,7 +9,8 @@ import {
   prefillPayment,
   getPrices,
   getSalespersonContact,
-  getSalespersonByCustomer,
+  getSalespersonByPayer,
+  getSalespersonSignature,
   generateSampleFlow,
   generateOrderTemplate,
   generateProcessTemplate,
@@ -17,6 +18,11 @@ import {
   checkOrder,
   getOrderRequest,
   createOrderRequest,
+  updateOrderRequest,
+  getOrderRequestFiles,
+  uploadOrderRequestFile,
+  downloadOrderRequestFile,
+  deleteOrderRequestFile,
   approveOrderRequest,
   returnOrderRequest
 } from '../api/api';
@@ -24,13 +30,26 @@ import { useNavigate } from 'react-router-dom';
 import { getSession } from '../auth';
 import '../css/Form.css'
 
+function buildOrderUrgencySymbols(value = 'normal') {
+  const urgency = ['normal', 'urgent_1_5x', 'urgent_2x'].includes(value) ? value : 'normal';
+  return {
+    orderUrgencyNormalSymbol: urgency === 'normal' ? '☑' : '☐',
+    orderUrgencyUrgentSymbol: urgency === 'urgent_1_5x' ? '☑' : '☐',
+    orderUrgencySpecialUrgentSymbol: urgency === 'urgent_2x' ? '☑' : '☐',
+    // 兼容旧模板变量；新模板请优先使用上面的 orderUrgency*Symbol。
+    serviceType1Symbol: urgency === 'normal' ? '☑' : '☐',
+    serviceType2Symbol: urgency === 'urgent_1_5x' ? '☑' : '☐',
+    serviceType3Symbol: urgency === 'urgent_2x' ? '☑' : '☐'
+  };
+}
+
 function buildRequestTemplateData(commissionData, context) {
-  const { selectedCustomer, selectedPayer, salesName, salesEmail, salesPhone } = context;
+  const { selectedCustomer, selectedPayer, salesUserId, salesName, salesEmail, salesPhone, salesSignatureDate } = context;
   const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
   const reportTypes = commissionData.reportInfo.type || [];
   const seals = commissionData.orderInfo.report_seals || [];
   return {
-    serviceType1Symbol: '☑', serviceType2Symbol: '☐', serviceType3Symbol: '☐',
+    ...buildOrderUrgencySymbols(commissionData.orderInfo.order_urgency_type),
     reportSeals1Symbol: seals.includes('normal') ? '☑' : '☐',
     reportSeals2Symbol: seals.includes('cnas') ? '☑' : '☐',
     reportSeals3Symbol: seals.includes('cma') ? '☑' : '☐',
@@ -82,6 +101,8 @@ function buildRequestTemplateData(commissionData, context) {
     breakableNoSymbol: commissionData.sampleRequirements.breakable === 'no' ? '☑' : '☐',
     brittleYesSymbol: commissionData.sampleRequirements.brittle === 'yes' ? '☑' : '☐',
     brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑' : '☐',
+    sales_user_id: salesUserId,
+    sales_signature_date: salesSignatureDate || '',
     sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone,
     testItems: commissionData.testItems.map((item, index) => ({
       ...item, idx: index + 1, material: String(item.material || '').trim(),
@@ -104,7 +125,45 @@ function buildRequestTemplateData(commissionData, context) {
   };
 }
 
+function formatSignatureDate(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function blobToDataUrl(data) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: 'image/png' });
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('电子签名图片读取失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function buildOrderMonthPreference(choice, baseDate = new Date()) {
+  const monthOffset = choice === 'next' ? 1 : 0;
+  const targetDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + monthOffset, 1);
+  const year = targetDate.getFullYear();
+  const month = targetDate.getMonth() + 1;
+  return {
+    choice: choice === 'next' ? 'next' : 'current',
+    year,
+    month,
+    monthKey: `${year}-${String(month).padStart(2, '0')}`
+  };
+}
+
+function formatAttachmentSize(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function FormPage({ workflowMode = 'direct', requestId = null }) {
+  const isSalesRequestMode = workflowMode === 'request' || workflowMode === 'edit';
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [showPrefillModal, setShowPrefillModal] = useState(false);
   const [showPayerModal, setShowPayerModal] = useState(false);
@@ -119,9 +178,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [orderTemplateFileName, setOrderTemplateFileName] = useState('');
   const [processTemplateFileName, setProcessTemplateFileName] = useState('');
   const [salespersons, setSalespersons] = useState([]);
+  const [salesUserId, setSalesUserId] = useState('');
   const [salesName, setSalesName] = useState('');
   const [salesEmail, setSalesEmail] = useState('');
   const [salesPhone, setSalesPhone] = useState('');
+  const [salesSignatureUrl, setSalesSignatureUrl] = useState('');
+  const [salesSignatureStatus, setSalesSignatureStatus] = useState('idle');
+  const [salesSignatureDate, setSalesSignatureDate] = useState('');
   const [customers, setCustomers] = useState([]);
   const [payers, setPayers] = useState([]);
   const [prefillPayers, setPrefillPayers] = useState([]);
@@ -141,6 +204,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   // 转单相关状态
   const [isTransferMode, setIsTransferMode] = useState(false);
   const [prefillOrderNum, setPrefillOrderNum] = useState('');
+  const [orderMonthPreference, setOrderMonthPreference] = useState(() =>
+    ['direct', 'request', 'edit'].includes(workflowMode) ? buildOrderMonthPreference('current') : null
+  );
   const [previousOrderId, setPreviousOrderId] = useState('');
   const [previousOrderSearchTerm, setPreviousOrderSearchTerm] = useState('');
   const [previousOrderSearchResults, setPreviousOrderSearchResults] = useState([]);
@@ -154,6 +220,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [reviewNote, setReviewNote] = useState('');
   const [submittedRequest, setSubmittedRequest] = useState(null);
   const [requestMeta, setRequestMeta] = useState(null);
+  const [businessTestItemsSnapshot, setBusinessTestItemsSnapshot] = useState([]);
+  const [requestAttachments, setRequestAttachments] = useState([]);
+  const [pendingAttachments, setPendingAttachments] = useState([]);
+  const [attachmentActionId, setAttachmentActionId] = useState(null);
+  const attachmentInputRef = useRef(null);
 
   // 静态部门数据（与后端 departments 对应）
   const departments = [
@@ -176,6 +247,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     { value: 'urgent_1_5x', label: '加急1.5倍' },
     { value: 'urgent_2x', label: '特急2倍' },
   ];
+  const orderUrgencyOptions = [
+    { value: 'normal', label: '正常', english: 'Standard', fee: '' },
+    { value: 'urgent_1_5x', label: '加急', english: 'Urgent', fee: '加收50%检测费用' },
+    { value: 'urgent_2x', label: '特急', english: 'Special Urgent', fee: '加收100%检测费用' }
+  ];
   const unitOptions = ['样品数', '机时', '点位', '次', '图', '天', '元素', '曲线'];
 
   // 初始化表单数据
@@ -195,6 +271,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       returnAddressOption: '',
       returnAddress: ''
     },
+    orderUrgencyType: 'normal',
     deliveryDays: '',
     reportSeals: [],
     sampleShippingAddress: '',
@@ -229,29 +306,44 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   });
 
   useEffect(() => {
-    if (workflowMode !== 'request') return;
-    const session = getSession();
-    if (session?.user?.username) {
-      setFormData(prev => ({ ...prev, salesPerson: session.user.username }));
-      setSalesName(session.user.name || '');
-    }
-  }, [workflowMode]);
-
-  useEffect(() => {
     if (!requestId) return;
     let active = true;
     getOrderRequest(requestId)
       .then(({ data }) => {
         if (!active) return;
+        if (workflowMode === 'edit' && !['submitted', 'returned'].includes(data.status)) {
+          alert('该申请已被处理，当前只能查看详情');
+          navigate(`/requests/${requestId}`, { replace: true });
+          return;
+        }
         const packet = data.reviewed_payload || data.submitted_payload || {};
         const snapshot = packet.formSnapshot || {};
-        if (snapshot.formData) setFormData(snapshot.formData);
+        const storedBusinessItems = Array.isArray(snapshot.businessTestItems)
+          ? snapshot.businessTestItems
+          : (!data.reviewed_payload && Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
+        setBusinessTestItemsSnapshot(storedBusinessItems);
+        if (snapshot.formData) {
+          const separateBusinessItems = workflowMode === 'review' || workflowMode === 'view';
+          const officialItems = data.reviewed_payload && Array.isArray(snapshot.formData.testItems)
+            ? snapshot.formData.testItems
+            : [];
+          setFormData({
+            ...snapshot.formData,
+            orderUrgencyType: snapshot.formData.orderUrgencyType
+              || packet.commissionData?.orderInfo?.order_urgency_type
+              || 'normal',
+            testItems: separateBusinessItems ? officialItems : (snapshot.formData.testItems || [])
+          });
+        }
         setSelectedCustomer(snapshot.selectedCustomer || null);
         setSelectedPayer(snapshot.selectedPayer || null);
         setIsTransferMode(Boolean(snapshot.isTransferMode));
+        setOrderMonthPreference(snapshot.orderMonthPreference || null);
         setPreviousOrderId(snapshot.previousOrderId || '');
         setPreviousOrderSearchTerm(snapshot.previousOrderSearchTerm || snapshot.previousOrderId || '');
         setSelectedPreviousOrder(snapshot.selectedPreviousOrder || null);
+        setSalesUserId(snapshot.salesUserId || packet.templateData?.sales_user_id || '');
+        setSalesSignatureDate(packet.templateData?.sales_signature_date || '');
         setSalesName(snapshot.salesName || '');
         setSalesEmail(snapshot.salesEmail || '');
         setSalesPhone(snapshot.salesPhone || '');
@@ -261,11 +353,84 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           status: data.status,
           applicantName: data.applicant_name,
           approvedOrderId: data.approved_order_id,
-          reviewNote: data.review_note
+          reviewNote: data.review_note,
+          version: data.version
         });
       })
       .catch(error => alert(error.response?.data?.message || '申请内容加载失败'))
       .finally(() => active && setRequestLoading(false));
+    return () => { active = false };
+  }, [navigate, requestId, workflowMode]);
+
+  useEffect(() => {
+    const payerId = selectedPayer?.payment_id || selectedPayer?.payer_id;
+    if (!payerId) return;
+    let active = true;
+    // 每次付款方切换都先清除旧联系人和旧图片。即使新旧付款方绑定同一工号，
+    // 也会在异步请求返回后重新触发签名读取，支持刚上传/替换的签名立即生效。
+    setSalesUserId('');
+    setSalesName('');
+    setSalesEmail('');
+    setSalesPhone('');
+    setSalesSignatureDate('');
+    getSalespersonByPayer(payerId)
+      .then(({ data }) => {
+        if (!active) return;
+        setSalesUserId(data.user_id || '');
+        setFormData(prev => ({ ...prev, salesPerson: data.account || '' }));
+        setSalesName(data.name || '');
+        setSalesEmail(data.email || '');
+        setSalesPhone(data.phone || '');
+        if (['request', 'edit', 'direct'].includes(workflowMode)) {
+          setSalesSignatureDate(formatSignatureDate());
+        }
+      })
+      .catch(error => {
+        if (!active) return;
+        console.error('获取付款方绑定的服务方联系人失败:', error);
+        setSalesUserId('');
+        setFormData(prev => ({ ...prev, salesPerson: '' }));
+        setSalesName('');
+        setSalesEmail('');
+        setSalesPhone('');
+        setSalesSignatureDate('');
+      });
+    return () => { active = false };
+  }, [selectedPayer?.payment_id, selectedPayer?.payer_id, workflowMode]);
+
+  useEffect(() => {
+    let active = true;
+    setSalesSignatureUrl('');
+    if (!salesUserId) {
+      setSalesSignatureStatus('idle');
+      return () => { active = false };
+    }
+    setSalesSignatureStatus('loading');
+    getSalespersonSignature(salesUserId)
+      .then(async ({ data }) => {
+        const dataUrl = await blobToDataUrl(data);
+        if (!active) return;
+        setSalesSignatureUrl(dataUrl);
+      })
+      .catch(error => {
+        if (!active) return;
+        if (error.response?.status !== 404) console.error('电子签名加载失败:', error);
+        setSalesSignatureUrl('');
+        setSalesSignatureStatus(error.response?.status === 404 ? 'missing' : 'error');
+      });
+    return () => {
+      active = false;
+    };
+  }, [salesUserId]);
+
+  useEffect(() => {
+    if (!requestId) return;
+    let active = true;
+    getOrderRequestFiles(requestId)
+      .then(({ data }) => active && setRequestAttachments(Array.isArray(data) ? data : []))
+      .catch((error) => {
+        if (active) console.error('申请附件加载失败:', error);
+      });
     return () => { active = false };
   }, [requestId]);
 
@@ -494,6 +659,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       if (data.serviceInfo) {
         const acct = data.serviceInfo.account;
         setFormData(f => ({ ...f, salesPerson: acct }));
+        setSalesUserId(data.serviceInfo.user_id || '');
         setSalesEmail(data.serviceInfo.email);
         setSalesPhone(data.serviceInfo.phone);
         setSalesName(data.serviceInfo.name);
@@ -501,6 +667,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         const acct = data.testItems[0].assignment_accounts.find(acct => acct && acct.includes('YW'));
         if (acct) {
           setFormData(f => ({ ...f, salesPerson: acct }));
+          setSalesUserId(salespersons.find(s => s.account === acct)?.user_id || '');
           const resp = await getSalespersonContact(acct);
           setSalesEmail(resp.data.user_email);
           setSalesPhone(resp.data.user_phone_num);
@@ -595,6 +762,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         // 使用后端返回的serviceInfo
         const acct = data.serviceInfo.account;
         setFormData(f => ({ ...f, salesPerson: acct }));
+        setSalesUserId(data.serviceInfo.user_id || '');
         setSalesEmail(data.serviceInfo.email);
         setSalesPhone(data.serviceInfo.phone);
         setSalesName(data.serviceInfo.name);
@@ -604,6 +772,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         if (acct) {
           console.log("acct", acct);
           setFormData(f => ({ ...f, salesPerson: acct }));
+          setSalesUserId(salespersons.find(s => s.account === acct)?.user_id || '');
           const resp = await getSalespersonContact(acct);
           console.log("resp", resp.data);
           setSalesEmail(resp.data.user_email); setSalesPhone(resp.data.user_phone_num);
@@ -843,6 +1012,72 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const downloadFile = (url, filename) => { const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); };
 
+  const handleAttachmentSelect = (event) => {
+    const files = Array.from(event.target.files || []);
+    const accepted = [];
+    const rejected = [];
+    files.forEach((file, index) => {
+      if (file.size > 20 * 1024 * 1024) rejected.push(file.name);
+      else accepted.push({ localId: `${Date.now()}-${index}-${file.name}`, file });
+    });
+    if (rejected.length) alert(`以下附件超过 20MB，未加入：\n${rejected.join('\n')}`);
+    if (accepted.length) setPendingAttachments(prev => [...prev, ...accepted]);
+    event.target.value = '';
+  };
+
+  const uploadPendingAttachments = async (targetRequestId) => {
+    const failed = [];
+    let latestVersion = requestMeta?.version;
+    for (const pending of pendingAttachments) {
+      try {
+        const { data } = await uploadOrderRequestFile(targetRequestId, pending.file);
+        if (data.version != null) latestVersion = data.version;
+        setRequestAttachments(prev => [...prev, data]);
+        setPendingAttachments(prev => prev.filter(item => item.localId !== pending.localId));
+      } catch (error) {
+        failed.push(`${pending.file.name}：${error.response?.data?.message || '上传失败'}`);
+      }
+    }
+    if (latestVersion != null) {
+      setRequestMeta(prev => prev ? { ...prev, version: latestVersion } : prev);
+    }
+    if (failed.length) throw new Error(failed.join('\n'));
+    return latestVersion;
+  };
+
+  const handleAttachmentDownload = async (attachment) => {
+    if (!requestId || attachmentActionId) return;
+    setAttachmentActionId(`download-${attachment.file_id}`);
+    try {
+      const response = await downloadOrderRequestFile(requestId, attachment.file_id);
+      const url = URL.createObjectURL(new Blob([response.data], { type: attachment.mime_type || 'application/octet-stream' }));
+      downloadFile(url, attachment.original_filename);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      if (error.response?.status === 404) {
+        setRequestAttachments(prev => prev.filter(item => item.file_id !== attachment.file_id));
+      }
+      alert(error.response?.data?.message || '附件下载失败');
+    } finally {
+      setAttachmentActionId(null);
+    }
+  };
+
+  const handleAttachmentDelete = async (attachment) => {
+    if (!requestId || attachmentActionId) return;
+    if (!window.confirm(`确认删除附件“${attachment.original_filename}”吗？`)) return;
+    setAttachmentActionId(`delete-${attachment.file_id}`);
+    try {
+      const { data } = await deleteOrderRequestFile(requestId, attachment.file_id);
+      setRequestAttachments(prev => prev.filter(item => item.file_id !== attachment.file_id));
+      if (data.version != null) setRequestMeta(prev => prev ? { ...prev, version: data.version } : prev);
+    } catch (error) {
+      alert(error.response?.data?.message || '附件删除失败');
+    } finally {
+      setAttachmentActionId(null);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (workflowMode === 'review' && !String(formData.orderNum || '').trim()) {
@@ -851,7 +1086,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     }
     const confirmText = workflowMode === 'review'
       ? '确认审批通过并生成正式委托单吗？'
-      : '请确认填写的信息是否正确，确认无误再提交审批';
+      : workflowMode === 'edit'
+        ? '确认保存本次修改吗？保存后申请将继续等待审批。'
+        : '请确认填写的信息是否正确，确认无误再提交审批';
     if (!window.confirm(confirmText)) return;
     
     // 转单模式验证
@@ -917,6 +1154,15 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
     for (let i = 0; i < formData.testItems.length; i++) {
       const ti = formData.testItems[i];
+      if (isSalesRequestMode) {
+        if (!String(ti.sampleName || '').trim()) { alert(`提交失败！第${i + 1}行：样品名称为必填项`); return; }
+        if (!String(ti.material || '').trim()) { alert(`提交失败！第${i + 1}行：材质为必填项`); return; }
+        if (!String(ti.sampleType || '').trim()) { alert(`提交失败！第${i + 1}行：样品类型为必填项`); return; }
+        if (!String(ti.test_item || '').trim()) { alert(`提交失败！第${i + 1}行：检测项目为必填项`); return; }
+        if (!String(ti.test_method || '').trim()) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
+        if (!String(ti.quantity || '').trim()) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
+        continue;
+      }
       const businessQuote = ti.price_note != null ? String(ti.price_note).trim() : '';
       const discountRate = ti.discount_rate != null ? String(ti.discount_rate).trim() : '';
       if (!ti.sampleName) { alert(`提交失败！第${i + 1}行：样品名称为必填项`); return; }
@@ -955,14 +1201,6 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       }
     }
 
-    const serviceUrgencyValues = formData.testItems.length
-      ? formData.testItems.map(item => item.service_urgency || 'normal')
-      : ['normal'];
-    const uniqueServiceUrgency = Array.from(new Set(serviceUrgencyValues));
-    const aggregatedServiceUrgency = uniqueServiceUrgency.length === 1 ? uniqueServiceUrgency[0] : 'normal';
-    const serviceUrgencyToCode = { normal: '1', urgent_1_5x: '2', urgent_2x: '3' };
-    const orderServiceTypeCode = serviceUrgencyToCode[aggregatedServiceUrgency] || '1';
-
     const commissionData = {
       customerId: selectedCustomer.customer_id,
       paymentId: selectedPayer.payment_id,
@@ -978,6 +1216,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         other_requirements: formData.otherRequirements,
         subcontracting_not_accepted: formData.subcontractingNotAccepted,
         report_seals: formData.reportSeals,
+        // 委托单级周期类型：只进入申请 JSON 和模板，不写入 orders 数据表。
+        order_urgency_type: formData.orderUrgencyType || 'normal',
         delivery_days_after_receipt: formData.deliveryDays !== '' ? Number(formData.deliveryDays) : null
       },
       vatType: '1', // 默认增值税普通发票
@@ -1012,31 +1252,36 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         group_id: item.group_id,
         discount_rate: item.discount_rate != null && String(item.discount_rate).trim() !== '' ? item.discount_rate : null,
         arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode,
-        sample_arrival_status: item.sample_arrival_status || 'arrived',
+        sample_arrival_status: isSalesRequestMode
+          ? (item.sample_arrival_status || '')
+          : (item.sample_arrival_status || 'arrived'),
         service_urgency: item.service_urgency || 'normal',
         seq_no: item.seq_no || null
       })),
       assignmentInfo: {
-        account: workflowMode === 'request'
+        account: isSalesRequestMode
           ? (getSession()?.user?.username || formData.salesPerson)
           : formData.salesPerson
       }
     };
 
     const requestTemplateData = buildRequestTemplateData(commissionData, {
-      selectedCustomer, selectedPayer, salesName, salesEmail, salesPhone
+      selectedCustomer, selectedPayer, salesUserId, salesName, salesEmail, salesPhone, salesSignatureDate
     });
     const requestPacket = {
       commissionData,
       templateData: requestTemplateData,
       formSnapshot: {
         formData,
+        businessTestItems: isSalesRequestMode ? formData.testItems : businessTestItemsSnapshot,
         selectedCustomer,
         selectedPayer,
         isTransferMode,
+        orderMonthPreference,
         previousOrderId,
         previousOrderSearchTerm,
         selectedPreviousOrder,
+        salesUserId,
         salesName,
         salesEmail,
         salesPhone
@@ -1046,6 +1291,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     if (workflowMode === 'request') {
       try {
         const response = await createOrderRequest(requestPacket);
+        if (pendingAttachments.length) {
+          try {
+            await uploadPendingAttachments(response.data.request_id);
+          } catch (attachmentError) {
+            alert(`申请已提交，但部分附件上传失败：\n${attachmentError.message}`);
+          }
+        }
         setSubmittedRequest(response.data);
       } catch (error) {
         alert(error.response?.data?.message || '申请提交失败，请重试');
@@ -1053,9 +1305,30 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       return;
     }
 
+    if (workflowMode === 'edit') {
+      try {
+        let currentVersion = requestMeta?.version;
+        if (pendingAttachments.length) {
+          try {
+            currentVersion = await uploadPendingAttachments(requestId);
+          } catch (attachmentError) {
+            alert(`部分附件上传失败：\n${attachmentError.message}\n请保留当前页面后重试。`);
+            return;
+          }
+        }
+        const response = await updateOrderRequest(requestId, requestPacket, currentVersion);
+        setRequestMeta(prev => prev ? { ...prev, status: 'submitted', reviewNote: null, version: response.data.version } : prev);
+        alert('申请修改已保存');
+        navigate('/');
+      } catch (error) {
+        alert(error.response?.data?.message || '申请修改失败，请重试');
+      }
+      return;
+    }
+
     if (workflowMode === 'review') {
       try {
-        const response = await approveOrderRequest(requestId, requestPacket, reviewNote);
+        const response = await approveOrderRequest(requestId, requestPacket, reviewNote, requestMeta?.version);
         alert(`审批通过，正式委托单号：${response.data.orderNum}`);
         navigate('/');
       } catch (error) {
@@ -1069,9 +1342,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       alert(`表单提交成功！委托单号为: ${response.data.orderNum}`);
       const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
       const templateData = {
-        serviceType1Symbol: orderServiceTypeCode === '1' ? '☑' : '☐',
-        serviceType2Symbol: orderServiceTypeCode === '2' ? '☑' : '☐',
-        serviceType3Symbol: orderServiceTypeCode === '3' ? '☑' : '☐',
+        ...buildOrderUrgencySymbols(commissionData.orderInfo.order_urgency_type),
         reportSeals1Symbol: commissionData.orderInfo.report_seals.includes('normal') ? '☑' : '☐',
         reportSeals2Symbol: commissionData.orderInfo.report_seals.includes('cnas') ? '☑' : '☐',
         reportSeals3Symbol: commissionData.orderInfo.report_seals.includes('cma') ? '☑' : '☐',
@@ -1124,6 +1395,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         breakableNoSymbol: commissionData.sampleRequirements.breakable === 'no' ? '☑' : '☐',
         brittleYesSymbol: commissionData.sampleRequirements.brittle === 'yes' ? '☑' : '☐',
         brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑' : '☐',
+        sales_user_id: salesUserId,
+        sales_signature_date: salesSignatureDate || '',
         sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone,
         testItems: commissionData.testItems.map((item, i) => ({
           ...item,
@@ -1208,9 +1481,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         headerType1Symbol: commissionData.reportInfo.header_type === '1' ? '☑' : '☐',
         headerType2Symbol: commissionData.reportInfo.header_type === '2' ? '☑' : '☐',
         header_additional_info: (commissionData.reportInfo.header_other || ''),
-        serviceType1Symbol: orderServiceTypeCode === '1' ? '☑' : '☐',
-        serviceType2Symbol: orderServiceTypeCode === '2' ? '☑' : '☐',
-        serviceType3Symbol: orderServiceTypeCode === '3' ? '☑' : '☐',
+        ...buildOrderUrgencySymbols(commissionData.orderInfo.order_urgency_type),
         delivery_days_after_receipt: commissionData.orderInfo.delivery_days_after_receipt,
         returnNoSymbol: commissionData.sampleHandling.handling_type === '1' ? '☑' : '☐',
         returnPickupSymbol: commissionData.sampleHandling.handling_type === '2' ? '☑' : '☐',
@@ -1273,33 +1544,15 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const handleCustomerSelect = (customer) => {
     setSelectedCustomer(customer);
-    
-    // 根据委托方ID获取对应的业务员信息
-    if (customer.commissioner_id) {
-      getSalespersonByCustomer(customer.commissioner_id)
-        .then(response => {
-          const salesperson = response.data;
-          console.log('业务员信息:', salesperson);
-          setFormData(prev => ({ ...prev, salesPerson: salesperson.account }));
-          setSalesName(salesperson.name);
-          setSalesEmail(salesperson.email);
-          setSalesPhone(salesperson.phone);
-          console.log('设置后的状态:', {
-            salesPerson: salesperson.account,
-            salesName: salesperson.name,
-            salesEmail: salesperson.email,
-            salesPhone: salesperson.phone
-          });
-        })
-        .catch(error => {
-          console.error('获取业务员信息失败:', error);
-          // 如果获取失败，清空业务员信息
-          setFormData(prev => ({ ...prev, salesPerson: '' }));
-          setSalesName('');
-          setSalesEmail('');
-          setSalesPhone('');
-        });
-    }
+    // 更换委托方时不能沿用上一付款方的服务方联系人/签名。
+    // 联系人将在实际选择付款方后，严格按 payers.owner_user_id 获取。
+    setSelectedPayer(null);
+    setFormData(prev => ({ ...prev, salesPerson: '' }));
+    setSalesUserId('');
+    setSalesName('');
+    setSalesEmail('');
+    setSalesPhone('');
+    setSalesSignatureDate('');
     
     try {
       prefillPayment(customer.commissioner_id)
@@ -1334,6 +1587,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     ? '审批委托申请'
     : workflowMode === 'view'
       ? '查看委托申请'
+      : workflowMode === 'edit'
+        ? '修改委托申请'
       : workflowMode === 'direct'
         ? '自行创建委托单'
         : '新建委托申请';
@@ -1341,12 +1596,21 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     ? '核对并修正表单，确认后生成正式委托单'
     : workflowMode === 'view'
       ? '完整表单只读展示，内容不可修改'
+      : workflowMode === 'edit'
+        ? '修改后保存，申请将继续等待开单员审批'
       : workflowMode === 'direct'
         ? '直接创建正式委托单，可使用实验室转单功能'
         : '填写完成后将提交给开单员审批';
   const requestStatusLabel = requestMeta
     ? ({ submitted: '待审批', approved: '已通过', returned: '已退回', withdrawn: '已撤回' }[requestMeta.status] || requestMeta.status)
     : '';
+  const currentMonthOption = buildOrderMonthPreference('current');
+  const nextMonthOption = buildOrderMonthPreference('next');
+  const selectedMonthLabel = orderMonthPreference?.choice === 'next'
+    ? '次月'
+    : orderMonthPreference?.choice === 'current'
+      ? '当月'
+      : '未选择';
 
   return (
     <div className={`workflow-form-page${isReadOnly ? ' workflow-readonly-mode' : ''}`}>
@@ -1366,13 +1630,23 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           {requestMeta.reviewNote && <div className="readonly-review-note"><span>审核意见</span><strong>{requestMeta.reviewNote}</strong></div>}
         </div>
       )}
+      {workflowMode === 'edit' && requestMeta?.status === 'returned' && requestMeta.reviewNote && (
+        <div className="workflow-edit-notice">
+          <span>退回原因</span>
+          <strong>{requestMeta.reviewNote}</strong>
+        </div>
+      )}
       {workflowMode === 'review' && (
         <div className="review-note-panel">
+          <div className={`review-month-value${orderMonthPreference?.choice === 'next' ? ' is-next' : ''}`}>
+            <span>委托单期望月份</span>
+            <strong>{orderMonthPreference ? selectedMonthLabel : '未选择'}</strong>
+          </div>
           <label className="review-order-number">正式委托单号<span style={{ color: 'red' }}> *</span>
             <input type="text" name="orderNum" value={formData.orderNum} onChange={handleInputChange} placeholder="审批通过前必须填写" />
           </label>
-          <label>审核备注 / 退回原因
-            <textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="审批通过时可选；退回申请时必填" />
+          <label className="review-note-input">审核备注 / 退回原因
+            <input type="text" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="审批通过时可选；退回申请时必填" />
           </label>
           <button type="button" onClick={handleReturnRequest}>退回申请</button>
         </div>
@@ -1384,34 +1658,57 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       </div>
       <form onSubmit={handleSubmit}>
         <fieldset className="workflow-form-shell" disabled={isReadOnly}>
-        {(workflowMode === 'direct' || workflowMode === 'request') && (
+        {(workflowMode === 'direct' || isSalesRequestMode) && (
           <section className="order-prefill-panel" aria-labelledby="order-prefill-title">
-            <div className="order-prefill-copy">
-              <strong id="order-prefill-title">预填委托单</strong>
-              <span>输入历史委托单号，可将原单信息带入当前表单；不会作为本次正式委托单号提交。</span>
+            <div className="order-prefill-main">
+              <div className="order-prefill-copy">
+                <strong id="order-prefill-title">预填委托单</strong>
+                <span>输入历史委托单号，可将原单信息带入当前表单；不会作为本次正式委托单号提交。</span>
+              </div>
+              <div className="order-prefill-action">
+                <input
+                  type="text"
+                  value={prefillOrderNum}
+                  onChange={(event) => setPrefillOrderNum(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      handlePrefill();
+                    }
+                  }}
+                  placeholder="请输入历史委托单号"
+                  aria-label="预填委托单号"
+                  disabled={workflowMode === 'direct' && isTransferMode}
+                />
+                <button
+                  type="button"
+                  onClick={handlePrefill}
+                  disabled={workflowMode === 'direct' && isTransferMode}
+                >
+                  预填表单
+                </button>
+              </div>
             </div>
-            <div className="order-prefill-action">
-              <input
-                type="text"
-                value={prefillOrderNum}
-                onChange={(event) => setPrefillOrderNum(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    handlePrefill();
-                  }
-                }}
-                placeholder="请输入历史委托单号"
-                aria-label="预填委托单号"
-                disabled={workflowMode === 'direct' && isTransferMode}
-              />
-              <button
-                type="button"
-                onClick={handlePrefill}
-                disabled={workflowMode === 'direct' && isTransferMode}
-              >
-                预填表单
-              </button>
+            <div className="order-month-selector" role="group" aria-label="期望委托单月份">
+              <strong className="order-month-title">委托单期望月份</strong>
+              <div className="order-month-options">
+                <button
+                  type="button"
+                  className={`order-month-option current${orderMonthPreference?.choice === 'current' ? ' is-selected' : ''}`}
+                  aria-pressed={orderMonthPreference?.choice === 'current'}
+                  onClick={() => setOrderMonthPreference(currentMonthOption)}
+                >
+                  <b>当月</b>
+                </button>
+                <button
+                  type="button"
+                  className={`order-month-option next${orderMonthPreference?.choice === 'next' ? ' is-selected' : ''}`}
+                  aria-pressed={orderMonthPreference?.choice === 'next'}
+                  onClick={() => setOrderMonthPreference(nextMonthOption)}
+                >
+                  <b>次月</b>
+                </button>
+              </div>
             </div>
             {workflowMode === 'direct' && isTransferMode && (
               <small>转单模式请使用下方“旧单号”检索，系统会按转单流程自动带入信息。</small>
@@ -1665,14 +1962,35 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         </div>
 
         <h3>检测信息 Test Information</h3>
-        <fieldset><legend>检测要求 Period Type</legend><label>以【检测要求附录】中信息为准 Subject to the Testing Requirements Appendix</label></fieldset>
+        <fieldset><legend>检测要求 Testing Requirements</legend><label>以【检测要求附录】中信息为准 Subject to the Testing Requirements Appendix</label></fieldset>
 
-        <fieldset>
-          <legend>交付时间 Delivery Time</legend>
-          <label style={{ display: 'block', marginTop: 8 }}>收样后
-            <input type="number" name="deliveryDays" min="0" value={formData.deliveryDays} onChange={handleInputChange} style={{ width: '4em', margin: '0 4px' }} /> 个工作日
-          </label>
-          <label>注：周六、周日及节假日不计入工作日Saturday, Sunday and festival days are not workdays</label>
+        <fieldset className="period-type-card">
+          <legend>周期类型 Period Type</legend>
+          <div className="period-type-content">
+            <div className="period-type-options" role="group" aria-label="委托单周期类型">
+              {orderUrgencyOptions.map(option => (
+                <label
+                  key={option.value}
+                  className={formData.orderUrgencyType === option.value ? 'is-selected' : ''}
+                >
+                  <input
+                    type="checkbox"
+                    checked={formData.orderUrgencyType === option.value}
+                    onChange={() => setFormData(prev => ({ ...prev, orderUrgencyType: option.value }))}
+                  />
+                  <span>{option.label} <small>{option.english}</small></span>
+                  {option.fee && <em>（{option.fee}）</em>}
+                </label>
+              ))}
+            </div>
+            <div className="period-delivery-time">
+              <strong>交付时间 <small>Delivery time</small>：</strong>
+              <span>收样后</span>
+              <input type="number" name="deliveryDays" min="0" value={formData.deliveryDays} onChange={handleInputChange} />
+              <span>个工作日 <small>（working days after sample receipt）</small></span>
+            </div>
+            <p className="period-type-note">注：周六、周日及节假日不计入工作日 Saturday, Sunday and festival days are not workdays</p>
+          </div>
         </fieldset>
 
         {/* 样品到达信息移动到每个检测项目行内 */}
@@ -1760,7 +2078,151 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           </p>
         </fieldset>
 
-        <h3>检测项目</h3>
+        {(workflowMode === 'review' || workflowMode === 'view') && businessTestItemsSnapshot.length > 0 && (
+          <section className="business-test-snapshot">
+            <h3>业务申请检测项目</h3>
+            <p>以下内容为业务提交时的原始填写，仅供开单录入参考。</p>
+            <div className="test-item-table-wrapper">
+              <table className="business-snapshot-table">
+                <thead>
+                  <tr>
+                    <th>序号</th>
+                    <th>样品名称</th>
+                    <th>材质</th>
+                    <th>样品类型</th>
+                    <th>样品原号</th>
+                    <th>检测项目</th>
+                    <th>检测标准</th>
+                    <th>样品到达方式</th>
+                    <th>是否到样</th>
+                    <th>流转备注</th>
+                    <th>数量</th>
+                    <th>备注</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {businessTestItemsSnapshot.map((item, index) => {
+                    const mappedSampleType = Object.entries(typeMappings.sampleType)
+                      .find(([, value]) => String(value) === String(item.sampleType))?.[0];
+                    const sampleTypeText = String(item.sampleType) === '5'
+                      ? (item.sampleTypeCustom || '其他')
+                      : (mappedSampleType || item.sampleType || '—');
+                    return (
+                      <tr key={index}>
+                        <td>{index + 1}</td>
+                        <td>{item.sampleName || '—'}</td>
+                        <td>{item.material || '—'}</td>
+                        <td>{sampleTypeText}</td>
+                        <td>{item.original_no || '—'}</td>
+                        <td>{item.test_item || '—'}</td>
+                        <td>{item.test_method || '—'}</td>
+                        <td>{item.arrival_mode === 'on_site' ? '现场到达' : ['mail', 'delivery'].includes(item.arrival_mode) ? '寄样' : '—'}</td>
+                        <td>{item.sample_arrival_status === 'arrived' ? '是' : item.sample_arrival_status === 'not_arrived' ? '否' : '—'}</td>
+                        <td>{item.flow_note || '—'}</td>
+                        <td>{item.quantity || '—'}</td>
+                        <td>{item.note || '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {isSalesRequestMode ? (
+          <>
+            <h3>检测项目</h3>
+            <div className="test-item-table-wrapper">
+              <table className="business-test-item-table">
+                <thead>
+                  <tr>
+                    <th className="num">序号</th>
+                    <th>样品名称<span style={{ color: 'red' }}>*</span></th>
+                    <th>材质<span style={{ color: 'red' }}>*</span></th>
+                    <th>样品类型<span style={{ color: 'red' }}>*</span></th>
+                    <th>样品原号</th>
+                    <th className="business-test-name-col">检测项目<span style={{ color: 'red' }}>*</span></th>
+                    <th>检测标准<span style={{ color: 'red' }}>*</span></th>
+                    <th className="business-choice-col">样品到达方式</th>
+                    <th className="business-choice-col">是否到样</th>
+                    <th className="business-flow-note-col">流转备注</th>
+                    <th>数量<span style={{ color: 'red' }}>*</span></th>
+                    <th>备注</th>
+                    <th className="action-col">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {formData.testItems.map((item, index) => {
+                    const mappedSampleType = Object.entries(typeMappings.sampleType)
+                      .find(([, value]) => String(value) === String(item.sampleType))?.[0];
+                    const sampleTypeValue = String(item.sampleType) === '5'
+                      ? (item.sampleTypeCustom || '')
+                      : (mappedSampleType || item.sampleType || '');
+                    return (
+                      <tr key={index}>
+                        <td className="num">{index + 1}</td>
+                        <td><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
+                        <td><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
+                        <td><input type="text" value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
+                        <td><input type="text" value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
+                        <td><input type="text" value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} /></td>
+                        <td><input type="text" value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
+                        <td className="business-choice-cell">
+                          {arrivalMethodOptions.map(option => (
+                            <label key={option.key}>
+                              <input
+                                type="radio"
+                                name={`business_arrival_${index}`}
+                                checked={(item.arrival_mode || '') === option.key || (item.arrival_mode === 'delivery' && option.key === 'mail')}
+                                onClick={() => handleTestItemChange(index, 'arrival_mode', option.key)}
+                                readOnly
+                              />
+                              {option.label}
+                            </label>
+                          ))}
+                        </td>
+                        <td className="business-choice-cell">
+                          <label>
+                            <input
+                              type="radio"
+                              name={`business_arrived_${index}`}
+                              checked={item.sample_arrival_status === 'arrived'}
+                              onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'arrived')}
+                              readOnly
+                            />
+                            是
+                          </label>
+                          <label>
+                            <input
+                              type="radio"
+                              name={`business_arrived_${index}`}
+                              checked={item.sample_arrival_status === 'not_arrived'}
+                              onClick={() => handleTestItemChange(index, 'sample_arrival_status', 'not_arrived')}
+                              readOnly
+                            />
+                            否
+                          </label>
+                        </td>
+                        <td><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} /></td>
+                        <td><input type="text" value={item.quantity || ''} onChange={e => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
+                        <td><input type="text" value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
+                        <td className="action-col add-remove-buttons">
+                          <button type="button" className="copy-button" onClick={() => duplicateTestItem(index)}>复制</button>
+                          <button type="button" className="remove-button" onClick={() => removeTestItem(index)}>删除</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="add-test-item-button"><button type="button" onClick={addTestItem}>添加新项目</button></div>
+          </>
+        ) : (
+        <>
+        {(workflowMode !== 'view' || formData.testItems.length > 0) && <h3>{workflowMode === 'review' ? '正式检测项目录入' : '检测项目'}</h3>}
+        {(workflowMode !== 'view' || formData.testItems.length > 0) && <>
         <div className="test-item-table-wrapper">
           <table className="test-item-table">
             <thead>
@@ -1778,7 +2240,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 <th>到达方式<br/>Arrival</th>
                 <th>是否到达<br/>Arrived</th>
                 {workflowMode !== 'request' && <th>流转顺序<br/>Seq No</th>}
-                <th>服务加急<br/>Urgency</th>
+                <th>加急类型<br/>Service Urgency</th>
                 {workflowMode === 'direct'
                   ? <th>制样<br/>Sample preparation</th>
                   : <th className="flow-note-col">流转备注<br/>Flow note</th>}
@@ -1946,25 +2408,95 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           </table>
         </div>
         <div className="add-test-item-button"><button type="button" onClick={addTestItem}>添加新项目</button></div>
-        <div className="block">
-          <label>其他要求 Other Requirements:
-            <input type="text" name="otherRequirements" value={formData.otherRequirements} onChange={handleOtherRequirementsChange} placeholder="填写其他特殊要求" />
-          </label>
-          <p>
-            注Notes：<br></br>
-            1.默认不出具评判结论；The judgment conclusion is not issued by default.<br></br>
-            2.若客户未指明测试标准及年代号，则默认为客户接受我方集萃新材料研发有限公司(以下简称JITRIAMRI)推荐的测试方法及最新标准；If the customer does not specify the test standards and the year, it will be deemed by default that the customer accepts the test methods and the latest standards recommended by JITRIAMRI.
-            <br></br>
-            3.
-            <input
-              type="checkbox"
-              name="subcontractingNotAccepted"
-              checked={formData.subcontractingNotAccepted}
-              onChange={handleSubcontractingChange}
-            />不接受分包 Subcontracting is not accepted；如未选择，视为接受分包；If not selected, it will be regarded as acceptance of subcontracting.
-            <br></br>
-            4.若需要CMA、CNAS章或其他测试要求，请在其他要求中写明(可另附页)。If CMA, CNAS stamps or other testing requirements are needed, please specify them in the other requirements.
-          </p>
+        </>}
+        </>
+        )}
+        <div className="block other-requirements-block">
+          <div className={`other-requirements-layout${workflowMode === 'direct' ? ' is-single' : ''}`}>
+            <div className="other-requirements-copy">
+              <label>其他要求 Other Requirements:
+                <input type="text" name="otherRequirements" value={formData.otherRequirements} onChange={handleOtherRequirementsChange} placeholder="填写其他特殊要求" />
+              </label>
+              <p>
+                注Notes：<br></br>
+                1.默认不出具评判结论；The judgment conclusion is not issued by default.<br></br>
+                2.若客户未指明测试标准及年代号，则默认为客户接受我方集萃新材料研发有限公司(以下简称JITRIAMRI)推荐的测试方法及最新标准；If the customer does not specify the test standards and the year, it will be deemed by default that the customer accepts the test methods and the latest standards recommended by JITRIAMRI.
+                <br></br>
+                3.
+                <label className="inline-selection-option">
+                  <input
+                    type="checkbox"
+                    name="subcontractingNotAccepted"
+                    checked={formData.subcontractingNotAccepted}
+                    onChange={handleSubcontractingChange}
+                  />
+                  不接受分包 Subcontracting is not accepted
+                </label>；如未选择，视为接受分包；If not selected, it will be regarded as acceptance of subcontracting.
+                <br></br>
+                4.若需要CMA、CNAS章或其他测试要求，请在其他要求中写明(可另附页)。If CMA, CNAS stamps or other testing requirements are needed, please specify them in the other requirements.
+              </p>
+            </div>
+            {workflowMode !== 'direct' && (
+              <aside className="request-attachments-panel">
+                <div className="request-attachments-heading">
+                  <strong>附件</strong>
+                  <span>单个文件不超过 20MB</span>
+                </div>
+                <div className="request-attachments-list">
+                  {requestAttachments.length === 0 && pendingAttachments.length === 0 && (
+                    <p className="request-attachments-empty">暂无附件</p>
+                  )}
+                  {pendingAttachments.map((pending) => (
+                    <div className="request-attachment-item is-pending" key={pending.localId}>
+                      <div>
+                        <strong>{pending.file.name}</strong>
+                        <span>{formatAttachmentSize(pending.file.size)} · 待提交</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="request-attachment-remove"
+                        aria-label={`移除附件 ${pending.file.name}`}
+                        title="移除"
+                        onClick={() => setPendingAttachments(prev => prev.filter(item => item.localId !== pending.localId))}
+                      >❌</button>
+                    </div>
+                  ))}
+                  {requestAttachments.map((attachment) => (
+                    <div className="request-attachment-item" key={attachment.file_id}>
+                      <div>
+                        <a
+                          href="#"
+                          onClick={(event) => { event.preventDefault(); handleAttachmentDownload(attachment); }}
+                        >
+                          {attachmentActionId === `download-${attachment.file_id}` ? '下载中…' : attachment.original_filename}
+                        </a>
+                        <span>{formatAttachmentSize(attachment.file_size)}</span>
+                      </div>
+                      {attachment.can_delete && ['edit', 'review'].includes(workflowMode) && (
+                        <button
+                          type="button"
+                          className="request-attachment-remove"
+                          aria-label={`删除附件 ${attachment.original_filename}`}
+                          title="删除"
+                          onClick={() => handleAttachmentDelete(attachment)}
+                          disabled={Boolean(attachmentActionId)}
+                        >❌</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {isSalesRequestMode && (
+                  <label className="request-attachment-upload">
+                    <input ref={attachmentInputRef} type="file" multiple onChange={handleAttachmentSelect} />
+                    <span>＋ 上传文件</span>
+                  </label>
+                )}
+                {requestMeta?.status === 'approved' && (
+                  <small>审批通过后的附件请在 LIMS 中管理。</small>
+                )}
+              </aside>
+            )}
+          </div>
         </div>
         <h3>样品要求 Sample Requirements</h3>
         <fieldset>
@@ -2029,8 +2561,49 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           <label><input type="radio" name="sampleSolutionType" value="4" onClick={() => handleRadioClick('sampleSolutionType', '4')} checked={formData.sampleSolutionType === '4'} readOnly />无剩余样品</label>
         </fieldset>
 
+        <section className="signature-confirmation" aria-label="签名确认">
+          <div className="signature-confirmation-cell">
+            <strong>★委托方签名确认/日期：</strong>
+            <span>Authorized Signature/Date：</span>
+            <div className="signature-line signature-line-empty" aria-label="委托方签名及日期留空"></div>
+          </div>
+          <div className="signature-confirmation-cell">
+            <strong>★评审人确认/日期：</strong>
+            <span>Representative/Date：</span>
+            <div className="signature-line">
+              <div className="signature-preview">
+                {salesSignatureUrl ? (
+                  <img
+                    src={salesSignatureUrl}
+                    alt={`${salesName || salesUserId}的电子签名`}
+                    onLoad={() => setSalesSignatureStatus('ready')}
+                    onError={() => {
+                      setSalesSignatureUrl('');
+                      setSalesSignatureStatus('error');
+                    }}
+                  />
+                ) : (
+                  <span className="signature-preview-fallback">
+                    {salesName || ''}
+                    {salesUserId && salesSignatureStatus === 'loading' && <small>（正在加载电子签名）</small>}
+                    {salesUserId && salesSignatureStatus === 'missing' && <small>（{salesUserId} 签名图片待上传）</small>}
+                    {salesUserId && salesSignatureStatus === 'error' && <small>（电子签名加载失败，请刷新重试）</small>}
+                  </span>
+                )}
+              </div>
+              {salesSignatureDate && <time dateTime={salesSignatureDate}>{salesSignatureDate}</time>}
+            </div>
+          </div>
+        </section>
+
         {!isReadOnly && <button type="submit" className="submit">
-          {workflowMode === 'review' ? '审批通过并生成正式委托单' : workflowMode === 'request' ? '提交审批' : '提交表单并生成Word'}
+          {workflowMode === 'review'
+            ? '审批通过并生成正式委托单'
+            : workflowMode === 'edit'
+              ? '保存修改'
+              : workflowMode === 'request'
+                ? '提交审批'
+                : '提交表单并生成Word'}
         </button>}
 
         {showCustomerModal && (

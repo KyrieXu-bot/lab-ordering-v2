@@ -2,6 +2,7 @@
 const express = require('express');
 const pool = require('../db');
 const { requireReviewer } = require('../middleware/auth');
+const { signatureExists } = require('../services/salesSignature');
 const router = express.Router();
 
 /**
@@ -256,10 +257,12 @@ router.get('/', async (req, res, next) => {
         );
         if (salesperson) {
           serviceInfo = {
+            user_id: salesperson.user_id,
             account: salesperson.account,
             name: salesperson.name,
             email: salesperson.email,
-            phone: salesperson.phone
+            phone: salesperson.phone,
+            signature_available: await signatureExists(salesperson.user_id)
           };
         }
       } catch (err) {
@@ -281,10 +284,12 @@ router.get('/', async (req, res, next) => {
           );
           if (salesperson) {
             serviceInfo = {
+              user_id: salesperson.user_id,
               account: salesperson.account,
               name: salesperson.name,
               email: salesperson.email,
-              phone: salesperson.phone
+              phone: salesperson.phone,
+              signature_available: await signatureExists(salesperson.user_id)
             };
           }
         } catch (err) {

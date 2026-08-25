@@ -34,6 +34,13 @@ body {
     background: transparent;
     color: var(--workflow-accent-dark);
     border: 1px solid #cbd4cf;
+    transition: background-color .16s ease, border-color .16s ease, color .16s ease;
+}
+
+.workflow-form-page .workflow-toolbar button:hover {
+    border-color: #8eaa9d;
+    background: #e8f1ec !important;
+    color: #315845 !important;
 }
 
 .workflow-form-page .workflow-toolbar strong,
@@ -49,34 +56,95 @@ body {
 }
 .workflow-form-page .order-prefill-panel {
     display: grid;
-    grid-template-columns: minmax(260px, 1fr) auto;
-    align-items: center;
-    gap: 10px 24px;
+    grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
+    align-items: stretch;
+    gap: 14px 20px;
     margin-bottom: 18px;
     padding: 16px 18px !important;
     border: 1px solid #cbd6d0;
     border-radius: 10px;
     background: #f0f5f2;
 }
+.workflow-form-page .order-prefill-main,
 .workflow-form-page .order-prefill-copy,
-.workflow-form-page .order-prefill-action { padding: 0 !important; }
+.workflow-form-page .order-prefill-action,
+.workflow-form-page .order-month-selector,
+.workflow-form-page .order-month-options { padding: 0 !important; }
+.workflow-form-page .order-prefill-main {
+    display: grid;
+    grid-template-rows: auto 40px;
+    align-content: start;
+    gap: 10px;
+}
+.workflow-form-page .order-prefill-copy { min-height: 42px; }
 .workflow-form-page .order-prefill-copy strong,
 .workflow-form-page .order-prefill-copy span { display: block; }
-.workflow-form-page .order-prefill-copy strong { color: #34483f; font-size: 15px; }
+.workflow-form-page .order-prefill-copy strong,
+.workflow-form-page .order-month-title {
+    color: #34483f;
+    font-size: 16px;
+    line-height: 22px;
+}
 .workflow-form-page .order-prefill-copy span { margin-top: 3px; color: #748079; font-size: 12px; }
-.workflow-form-page .order-prefill-action { display: flex; align-items: center; gap: 10px; }
+.workflow-form-page .order-prefill-action { display: flex; height: 40px; align-items: stretch; gap: 10px; }
 .workflow-form-page .order-prefill-action input {
-    width: 250px;
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+    height: 40px;
+    box-sizing: border-box;
     margin: 0;
     padding: 9px 11px;
     border: 1px solid #becbc4;
     border-radius: 7px;
     background: #fff;
 }
-.workflow-form-page .order-prefill-action button { white-space: nowrap; }
-.workflow-form-page .order-prefill-panel small {
+.workflow-form-page .order-prefill-action button {
+    display: inline-flex;
+    height: 40px;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+}
+.workflow-form-page .order-prefill-panel > small {
     grid-column: 1 / -1;
     color: #8b6953;
+}
+.workflow-form-page .order-month-selector {
+    display: grid;
+    grid-template-rows: 42px 40px;
+    align-content: start;
+    padding-left: 20px !important;
+    border-left: 1px solid #c7d3cc;
+}
+.workflow-form-page .order-month-title { margin: 0; }
+.workflow-form-page .order-month-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(72px, 110px));
+    height: 40px;
+    gap: 8px;
+}
+.workflow-form-page .order-month-option {
+    min-height: 40px;
+    padding: 5px 8px;
+    border: 1px solid #b9c8c0;
+    border-radius: 7px;
+    background: #fff;
+    color: #44554d;
+    box-shadow: none;
+}
+.workflow-form-page .order-month-option b { display: block; font-size: 13px; }
+.workflow-form-page .order-month-option.current.is-selected {
+    border-color: #376c57;
+    background: #376c57;
+    color: #fff;
+    box-shadow: 0 5px 14px rgba(55, 108, 87, .25);
+}
+.workflow-form-page .order-month-option.next.is-selected {
+    border-color: #b56832;
+    background: #b56832;
+    color: #fff;
+    box-shadow: 0 5px 14px rgba(181, 104, 50, .28);
 }
 .workflow-readonly-mode form button,
 .workflow-readonly-mode .action-col,
@@ -112,22 +180,250 @@ body {
 .workflow-readonly-summary span { margin-bottom: 5px; color: #7c8782; font-size: 12px; }
 .workflow-readonly-summary strong { color: #35443d; font-size: 14px; }
 .workflow-readonly-summary .readonly-review-note { grid-column: 1 / -1; }
+.workflow-form-page .workflow-edit-notice {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 14px;
+    padding: 12px 16px !important;
+    border: 1px solid #dfc2ad;
+    border-radius: 9px;
+    background: #fff2e8;
+}
+.workflow-form-page .workflow-edit-notice span { flex: 0 0 auto; color: #915b36; }
+.workflow-form-page .workflow-edit-notice strong { color: #6f4125; }
+
+.workflow-form-page .signature-confirmation {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 20px 0;
+    overflow: hidden;
+    border: 1px solid #9da8a2;
+    border-radius: 8px;
+    background: #fff;
+}
+.workflow-form-page .signature-confirmation-cell {
+    min-width: 0;
+    min-height: 104px;
+    padding: 12px 16px !important;
+}
+.workflow-form-page .signature-confirmation-cell + .signature-confirmation-cell { border-left: 1px solid #9da8a2; }
+.workflow-form-page .signature-confirmation-cell strong,
+.workflow-form-page .signature-confirmation-cell > span { display: block; }
+.workflow-form-page .signature-confirmation-cell strong { color: #2f3d37; font-size: 14px; }
+.workflow-form-page .signature-confirmation-cell > span { margin-top: 2px; color: #57645e; font-family: "Times New Roman", serif; font-size: 13px; }
+.workflow-form-page .signature-line {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    min-height: 50px;
+    margin-top: 3px;
+    border-bottom: 1px solid #333;
+}
+.workflow-form-page .signature-line-empty { width: min(100%, 360px); }
+.workflow-form-page .signature-preview {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 46px;
+    align-items: center;
+}
+.workflow-form-page .signature-preview img {
+  display: block;
+  position: static;
+  inset: auto;
+  width: auto;
+  height: auto;
+  max-width: 150px;
+  max-height: 46px;
+  object-fit: contain;
+}
+.workflow-form-page .signature-preview-fallback { color: #56635d; font-size: 13px; }
+.workflow-form-page .signature-preview-fallback small { display: block; color: #9a6a4a; font-size: 11px; }
+.workflow-form-page .signature-line time { flex: 0 0 auto; padding-bottom: 6px; color: #35443d; font-size: 13px; }
 
 .workflow-form-page .review-note-panel {
     display: flex;
     align-items: flex-end;
-    gap: 16px;
+    gap: 14px;
     margin-bottom: 16px;
     padding: 18px 20px !important;
     background: #f5eee5;
     border: 1px solid #dfd1bf;
     border-radius: 12px;
 }
-.workflow-form-page .review-note-panel label { width: 100%; margin: 0; padding: 0; }
-.workflow-form-page .review-note-panel textarea { display: block; width: 100%; min-height: 70px; margin-top: 7px; padding: 10px; border: 1px solid #d5c7b5; border-radius: 8px; resize: vertical; }
-.workflow-form-page .review-note-panel button { flex: 0 0 auto; background: #9a6157; }
-.workflow-form-page .review-note-panel .review-order-number { flex:0 0 260px; width:260px; }
-.workflow-form-page .review-note-panel .review-order-number input { display:block; width:100%; margin-top:7px; padding:10px; border:1px solid #d5c7b5; border-radius:8px; background:#fff; }
+.workflow-form-page .review-note-panel label { width: auto; margin: 0; padding: 0; }
+.workflow-form-page .review-note-panel input { box-sizing: border-box; display: block; width: 100%; height: 42px; margin-top: 7px; padding: 9px 10px; border: 1px solid #d5c7b5; border-radius: 8px; background: #fff; }
+.workflow-form-page .review-note-panel button { flex: 0 0 auto; height: 42px; margin: 0; background: #9a6157; }
+.workflow-form-page .review-note-panel .review-order-number { flex: 0 0 260px; width: 260px; }
+.workflow-form-page .review-note-panel .review-note-input { flex: 1 1 auto; min-width: 260px; }
+.workflow-form-page .review-month-value {
+    box-sizing: border-box;
+    display: flex;
+    flex: 0 0 175px;
+    min-height: 66px;
+    flex-direction: column;
+    justify-content: center;
+    padding: 8px 14px !important;
+    border: 1px solid #9ab4a8;
+    border-radius: 8px;
+    background: #edf5f1;
+}
+.workflow-form-page .review-month-value span { color: #63736b; font-size: 12px; }
+.workflow-form-page .review-month-value strong { color: #315845; font-size: 20px; }
+.workflow-form-page .review-month-value.is-next { border-color: #d6a27c; background: #fff2e8; }
+.workflow-form-page .review-month-value.is-next strong { color: #9a5427; }
+
+.workflow-form-page .period-type-card { background: #fbfcfb; }
+.workflow-form-page .period-type-content,
+.workflow-form-page .period-type-options,
+.workflow-form-page .period-delivery-time { padding: 0 !important; }
+.workflow-form-page .period-type-options {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 9px 24px;
+    margin-bottom: 12px;
+}
+.workflow-form-page .period-type-options label {
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    gap: 5px;
+    margin: 0;
+    padding: 5px 8px;
+    border-radius: 6px;
+    color: #46534d;
+    font-weight: 500;
+}
+.workflow-form-page .period-type-options label.is-selected { background: #e8f1ec; color: #315845; }
+.workflow-form-page .period-type-options input { flex: 0 0 auto; margin: 0; }
+.workflow-form-page .period-type-options small { font-size: 12px; font-weight: 500; }
+.workflow-form-page .period-type-options em { color: #7b6757; font-size: 12px; font-style: normal; }
+.workflow-form-page .workflow-form-shell label:has(> input[type="checkbox"]),
+.workflow-form-page .workflow-form-shell label:has(> input[type="radio"]) {
+    box-sizing: border-box;
+    border-radius: 6px;
+    transition: background-color .16s ease, color .16s ease, box-shadow .16s ease;
+}
+.workflow-form-page .workflow-form-shell label:has(> input[type="checkbox"]:checked),
+.workflow-form-page .workflow-form-shell label:has(> input[type="radio"]:checked) {
+    background: #e8f1ec;
+    color: #315845;
+    box-shadow: inset 0 0 0 1px rgba(80, 119, 99, .08);
+}
+.workflow-form-page .workflow-form-shell .inline-selection-option {
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    margin: 0 2px;
+    padding: 5px 8px;
+}
+.workflow-form-page .period-delivery-time {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 6px;
+    color: #3e4843;
+}
+.workflow-form-page .period-delivery-time strong { margin-right: 2px; }
+.workflow-form-page .period-delivery-time strong small,
+.workflow-form-page .period-delivery-time span small { font-size: 12px; font-weight: 500; }
+.workflow-form-page .period-delivery-time input[type="number"] {
+    box-sizing: border-box;
+    width: 64px;
+    margin: 0;
+    padding: 5px 7px;
+    text-align: center;
+}
+.workflow-form-page .period-type-note { margin: 0; color: #727c77; font-size: 12px; }
+
+.workflow-form-page .other-requirements-block { padding: 0 !important; }
+.workflow-form-page .other-requirements-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
+    gap: 18px;
+    padding: 16px !important;
+}
+.workflow-form-page .other-requirements-layout.is-single { grid-template-columns: 1fr; }
+.workflow-form-page .other-requirements-copy,
+.workflow-form-page .request-attachments-panel,
+.workflow-form-page .request-attachments-heading,
+.workflow-form-page .request-attachments-list,
+.workflow-form-page .request-attachment-item,
+.workflow-form-page .request-attachment-item > div { padding: 0 !important; }
+.workflow-form-page .other-requirements-copy > label { display: block; margin-right: 0; }
+.workflow-form-page .request-attachments-panel {
+    align-self: stretch;
+    padding: 14px !important;
+    border: 1px solid #c9d5cf;
+    border-radius: 10px;
+    background: #f4f7f5;
+}
+.workflow-form-page .request-attachments-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+.workflow-form-page .request-attachments-heading strong { color: #34483f; font-size: 15px; }
+.workflow-form-page .request-attachments-heading span,
+.workflow-form-page .request-attachments-panel small { color: #7c8782; font-size: 12px; }
+.workflow-form-page .request-attachments-list { display: grid; gap: 7px; margin-bottom: 10px; }
+.workflow-form-page .request-attachments-empty { margin: 8px 0; color: #8a938f; text-align: center; }
+.workflow-form-page .request-attachment-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+    padding: 9px 10px !important;
+    border: 1px solid #d7dedb;
+    border-radius: 7px;
+    background: #fff;
+}
+.workflow-form-page .request-attachment-item.is-pending { border-style: dashed; background: #fffaf2; }
+.workflow-form-page .request-attachment-item > div { min-width: 0; }
+.workflow-form-page .request-attachment-item strong,
+.workflow-form-page .request-attachment-item a,
+.workflow-form-page .request-attachment-item span { display: block; }
+.workflow-form-page .request-attachment-item strong,
+.workflow-form-page .request-attachment-item a {
+    overflow: hidden;
+    color: #315845;
+    font-size: 13px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.workflow-form-page .request-attachment-item a { cursor: pointer; text-decoration: underline; }
+.workflow-form-page .request-attachment-item span { margin-top: 2px; color: #88918d; font-size: 11px; }
+.workflow-form-page .request-attachment-remove,
+.workflow-form-page .request-attachment-remove:hover {
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    font-size: 13px;
+    line-height: 26px;
+}
+.workflow-form-page .request-attachment-upload { display: block; margin: 0 0 8px; }
+.workflow-form-page .request-attachment-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.workflow-form-page .request-attachment-upload span {
+    display: block;
+    padding: 9px 12px;
+    border: 1px dashed #6f9181;
+    border-radius: 7px;
+    background: #e9f2ed;
+    color: #315845;
+    cursor: pointer;
+    text-align: center;
+}
 
 .workflow-form-page .header-section { background: #fff; border: 1px solid var(--workflow-line); border-radius: 12px 12px 0 0; margin: 0; }
 .workflow-form-page h1,
@@ -180,7 +476,7 @@ body {
 .workflow-form-page .report-row-content label {
     width: auto;
     margin: 0;
-    padding: 5px 0;
+    padding: 5px 8px;
     font-weight: 600;
     color: #35413c;
 }
@@ -247,10 +543,16 @@ body {
 
 @media (max-width: 800px) {
     .workflow-form-page .order-prefill-panel { grid-template-columns: 1fr; }
-    .workflow-form-page .order-prefill-action { align-items: stretch; flex-direction: column; }
+    .workflow-form-page .order-month-selector { padding-top: 14px !important; padding-left: 0 !important; border-top: 1px solid #c7d3cc; border-left: 0; }
+    .workflow-form-page .order-prefill-main { grid-template-rows: auto auto; }
+    .workflow-form-page .order-prefill-action { height: auto; align-items: stretch; flex-direction: column; }
     .workflow-form-page .order-prefill-action input { box-sizing: border-box; width: 100%; }
     .workflow-form-page .review-note-panel { align-items:stretch; flex-direction:column; }
     .workflow-form-page .review-note-panel .review-order-number { flex:auto; width:100%; }
+    .workflow-form-page .review-month-value { flex: auto; }
+    .workflow-form-page .other-requirements-layout { grid-template-columns: 1fr; }
+    .workflow-form-page .signature-confirmation { grid-template-columns: 1fr; }
+    .workflow-form-page .signature-confirmation-cell + .signature-confirmation-cell { border-top: 1px solid #9da8a2; border-left: 0; }
     .workflow-form-page .report-row { grid-template-columns: 1fr; }
     .workflow-form-page .report-row-label { border-right: 0; border-bottom: 1px solid #d4dad6; padding: 10px 14px !important; }
     .workflow-form-page .report-row-content { padding: 12px 14px !important; }
@@ -262,7 +564,7 @@ div {
     padding: 15px;
 }
 
-div>img {
+.header-section > img {
     width: 16%;
     position: absolute;
     top: 10px;
@@ -423,6 +725,90 @@ button:hover {
     margin: 1em 0;
     padding: 0;
 }
+
+.business-test-item-table,
+.business-snapshot-table {
+    width: 100%;
+    min-width: 1495px;
+    border-collapse: collapse;
+}
+.business-test-item-table th,
+.business-test-item-table td,
+.business-snapshot-table th,
+.business-snapshot-table td {
+    padding: 8px;
+    border: 1px solid #ccd2ce;
+    text-align: left;
+    vertical-align: middle;
+}
+.business-test-item-table th,
+.business-snapshot-table th { background: #f3f5f3; white-space: nowrap; }
+.business-test-item-table th.num,
+.business-test-item-table td.num { width: 42px; min-width: 42px; text-align: center; }
+.business-test-item-table td { min-width: 120px; }
+.business-test-item-table input {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 110px;
+    margin: 0;
+    padding: 9px 10px;
+    border: 1px solid #c8cfcb;
+    border-radius: 6px;
+    background: #fff;
+}
+.business-test-item-table .business-test-name-col,
+.business-test-item-table td:nth-child(6) { width: 345px; min-width: 345px; }
+.business-test-item-table .business-test-name-col + th { min-width: 230px; }
+.business-test-item-table .business-flow-note-col { min-width: 220px; }
+.business-test-item-table .business-choice-col { min-width: 170px; }
+.business-test-item-table .business-choice-cell { min-width: 170px; white-space: nowrap; }
+.business-test-item-table .business-choice-cell label {
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    margin: 0 12px 0 0;
+    padding: 5px 7px;
+    font-weight: 500;
+}
+.business-test-item-table .business-choice-cell input[type="radio"] {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    margin: 0 5px 0 0;
+    padding: 0;
+}
+.business-test-item-table th.action-col,
+.business-test-item-table td.action-col {
+    position: sticky;
+    right: 0;
+    z-index: 5;
+    min-width: 132px;
+    background: #fff;
+    box-shadow: -4px 0 7px rgba(55, 70, 63, .08);
+}
+.business-test-item-table th.action-col { z-index: 7; background: #eef2ef; }
+.business-test-item-table .add-remove-buttons { display: flex; gap: 6px; }
+.business-test-item-table .add-remove-buttons button { margin: 0; white-space: nowrap; }
+.business-test-snapshot {
+    margin: 18px 0 24px;
+    padding: 16px 18px !important;
+    border: 1px solid #b9cbc2;
+    border-radius: 12px;
+    background: #f3f7f5;
+}
+.business-test-snapshot h3 { margin-top: 0; }
+.business-test-snapshot > p { margin: -4px 0 10px; color: #6f7b75; font-size: 13px; }
+.business-test-snapshot .test-item-table-wrapper { margin-bottom: 0; }
+.business-snapshot-table { min-width: 1445px; background: #fff; }
+.business-snapshot-table td { min-width: 105px; white-space: normal; }
+.business-snapshot-table th:nth-child(6),
+.business-snapshot-table td:nth-child(6) { width: 345px; min-width: 345px; }
+.business-snapshot-table th:nth-child(7),
+.business-snapshot-table td:nth-child(7),
+.business-snapshot-table th:nth-child(8),
+.business-snapshot-table td:nth-child(8),
+.business-snapshot-table th:nth-child(10),
+.business-snapshot-table td:nth-child(10) { min-width: 180px; }
 
 
 /* 表格样式的检测项目 */

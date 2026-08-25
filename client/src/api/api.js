@@ -21,10 +21,22 @@ export const login = (username, password) => axios.post('/api/auth/login', { use
 export const getOrderRequests = (params = {}) => axios.get('/api/order-requests', { params })
 export const getOrderRequest = (id) => axios.get(`/api/order-requests/${id}`)
 export const createOrderRequest = (payload) => axios.post('/api/order-requests', { payload })
+export const updateOrderRequest = (id, payload, version) =>
+  axios.put(`/api/order-requests/${id}`, { payload, version })
+export const getOrderRequestFiles = (id) => axios.get(`/api/order-requests/${id}/files`)
+export const uploadOrderRequestFile = (id, file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return axios.post(`/api/order-requests/${id}/files`, formData)
+}
+export const downloadOrderRequestFile = (requestId, fileId) =>
+  axios.get(`/api/order-requests/${requestId}/files/${fileId}/download`, { responseType: 'blob' })
+export const deleteOrderRequestFile = (requestId, fileId) =>
+  axios.delete(`/api/order-requests/${requestId}/files/${fileId}`)
 export const withdrawOrderRequest = (id) => axios.post(`/api/order-requests/${id}/withdraw`)
 export const returnOrderRequest = (id, note) => axios.post(`/api/order-requests/${id}/return`, { note })
-export const approveOrderRequest = (id, payload, note = '') =>
-  axios.post(`/api/order-requests/${id}/approve`, { payload, note })
+export const approveOrderRequest = (id, payload, note = '', version) =>
+  axios.post(`/api/order-requests/${id}/approve`, { payload, note, version })
 export const generateOrderRequestPdf = (id) =>
   axios.post(`/api/order-requests/${id}/generate-pdf`)
 export const downloadOrderRequestAttachment = (id) =>
@@ -42,8 +54,13 @@ export const generateSampleFlow = (data) =>
 export const getSalesperson = () => axios.get('/api/salespersons')
 export const getSalespersonContact = (account) =>
   axios.get('/api/salespersons/contact', { params: { account } })
-export const getSalespersonByCustomer = (commissioner_id) =>
-  axios.get('/api/salespersons/by-customer', { params: { commissioner_id } })
+export const getSalespersonByPayer = (payer_id) =>
+  axios.get('/api/salespersons/by-payer', { params: { payer_id } })
+export const getSalespersonSignature = (userId) =>
+  axios.get(`/api/salespersons/${encodeURIComponent(userId)}/signature`, {
+    params: { refresh: Date.now() },
+    responseType: 'blob'
+  })
 
 export const getCustomers = (customerNameTerm, contactNameTerm, contactPhoneTerm) =>
   axios.get('/api/form/customers', { params: {

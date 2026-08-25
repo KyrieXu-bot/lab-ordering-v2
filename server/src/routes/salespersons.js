@@ -1,5 +1,11 @@
 const express = require('express');
 const pool = require('../db');
+const {
+  getSalespersonByPayer,
+  normalizeUserId,
+  signaturePathForUser,
+  signatureExists
+} = require('../services/salesSignature');
 const router = express.Router();
 
 // 列出业务员（优先按角色= sales；否则按工号/账号前缀 YW）
@@ -99,8 +105,32 @@ router.get('/by-customer', async (req, res, next) => {
       account: row.account,
       name: row.name,
       email: row.email,
-      phone: row.phone
+      phone: row.phone,
+      signature_available: await signatureExists(row.user_id)
     });
+  } catch (e) { next(e); }
+});
+
+// 服务方信息及电子签名必须以实际选择的付款方 owner_user_id 为准。
+router.get('/by-payer', async (req, res, next) => {
+  try {
+    const { payer_id } = req.query;
+    if (!payer_id) return res.status(400).json({ message: 'payer_id required' });
+    const salesperson = await getSalespersonByPayer(pool, payer_id);
+    if (!salesperson) return res.status(404).json({ message: '该付款方未绑定有效的服务方联系人' });
+    res.json(salesperson);
+  } catch (e) { next(e); }
+});
+
+router.get('/:userId/signature', async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    const userId = normalizeUserId(req.params.userId);
+    const signaturePath = signaturePathForUser(userId);
+    if (!signaturePath || !(await signatureExists(userId))) {
+      return res.status(404).json({ message: '该联系人尚未配置电子签名' });
+    }
+    res.type('png').sendFile(signaturePath);
   } catch (e) { next(e); }
 });
 

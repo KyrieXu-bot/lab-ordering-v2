@@ -1,13 +1,43 @@
 const express = require('express');
-const { Document, Packer, Paragraph, HeadingLevel, TextRun, Table, TableRow, TableCell } = require('docx');
+const fs = require('fs').promises;
+const { Document, Packer, Paragraph, HeadingLevel, TextRun, ImageRun, Table, TableRow, TableCell } = require('docx');
+const { signaturePathForUser } = require('../services/salesSignature');
+const { readPngSize } = require('../services/orderTemplate');
 const router = express.Router();
 
 function para(text){ return new Paragraph({ children: [ new TextRun(String(text||'')) ] }); }
 function head(text){ return new Paragraph({ text: String(text||''), heading: HeadingLevel.HEADING_2 }); }
 
+async function representativeSignatureChildren(data) {
+  const userId = String(data.sales_user_id || '').trim();
+  const name = String(data.sales_name || userId || '').trim();
+  const date = String(data.sales_signature_date || '').trim();
+  const signaturePath = signaturePathForUser(userId);
+  if (signaturePath) {
+    try {
+      const image = await fs.readFile(signaturePath);
+      const size = readPngSize(image);
+      const scale = Math.min(120 / size.width, 38 / size.height, 1);
+      return [
+        new ImageRun({
+          data: image,
+          transformation: { width: Math.round(size.width * scale), height: Math.round(size.height * scale) },
+          altText: { title: '电子签名', description: `${name}的电子签名`, name: `${userId}.png` },
+          type: 'png'
+        }),
+        new TextRun({ text: `  ${date}`, underline: {} })
+      ];
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  return [new TextRun({ text: `${name || '                    '}  ${date}`, underline: {} })];
+}
+
 router.post('/commission', async (req, res, next) => {
   try {
     const d = req.body || {};
+    const representativeChildren = await representativeSignatureChildren(d);
     const doc = new Document({ sections: [{
       properties: {},
       children: [
@@ -32,7 +62,22 @@ router.post('/commission', async (req, res, next) => {
           ]
         }),
         head("重要说明"),
-        para(d.other_requirements || '')
+        para(d.other_requirements || ''),
+        head('签名确认 / Signature Confirmation'),
+        new Table({
+          rows: [
+            new TableRow({ children: [
+              new TableCell({ children: [
+                para('★委托方签名确认/日期：'),
+                new Paragraph({ children: [new TextRun({ text: 'Authorized Signature/Date:                         ', underline: {} })] })
+              ] }),
+              new TableCell({ children: [
+                para('★评审人确认/日期：'),
+                new Paragraph({ children: [new TextRun('Representative/Date: '), ...representativeChildren] })
+              ] })
+            ] })
+          ]
+        })
       ]
     }]});
 

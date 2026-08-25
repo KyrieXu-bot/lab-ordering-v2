@@ -1,14 +1,17 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { clearSession, getSession } from '../auth'
 import '../css/Portal.css'
 
-export default function PortalLayout({ children, wide = false }) {
+export default function PortalLayout({ children, wide = false, dashboard = false }) {
   const navigate = useNavigate()
   const session = getSession()
   const user = session?.user
+  useEffect(() => {
+    if (dashboard) window.scrollTo({ top: 0, left: 0 })
+  }, [dashboard])
   return (
-    <div className="portal-shell">
+    <div className={`portal-shell${dashboard ? ' portal-dashboard-shell' : ''}`}>
       <header className="portal-header">
         <button className="portal-brand" onClick={() => navigate('/')} type="button">
           <span className="portal-brand-mark">J</span>
@@ -20,7 +23,7 @@ export default function PortalLayout({ children, wide = false }) {
           <button type="button" className="portal-link-button" onClick={() => { clearSession(); navigate('/login') }}>退出登录</button>
         </div>
       </header>
-      <main className={wide ? 'portal-main portal-main-wide' : 'portal-main'}>{children}</main>
+      <main className={`portal-main${wide ? ' portal-main-wide' : ''}${dashboard ? ' portal-main-dashboard' : ''}`}>{children}</main>
     </div>
   )
 }
