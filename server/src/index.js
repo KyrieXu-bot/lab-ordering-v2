@@ -19,6 +19,7 @@ const { router: commissionRouter } = require('./routes/commission');
 const { router: documentsRouter } = require('./routes/documents');
 const { router: templatesRouter } = require('./routes/templates');
 const { router: orderRequestsRouter } = require('./routes/orderRequests');
+const { router: commissionerSignaturesRouter } = require('./routes/commissionerSignatures');
 
 const app = express();
 app.use(cors());
@@ -45,6 +46,7 @@ app.use('/api/commission', commissionRouter);
 app.use('/api/documents', documentsRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/order-requests', orderRequestsRouter);
+app.use('/api/commissioner-signatures', commissionerSignaturesRouter);
 
 app.use((error, req, res, next) => {
   console.error(error);

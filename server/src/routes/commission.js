@@ -323,6 +323,8 @@ router.get('/', async (req, res, next) => {
 async function createCommissionFromPayload(payload, options = {}) {
   const ownsConnection = !options.connection;
   const conn = options.connection || await pool.getConnection();
+  let orderNumberLockName = null;
+  let orderNumberLockAcquired = false;
   try {
     if (ownsConnection) await conn.beginTransaction();
     const customerId = payload.customerId;
@@ -408,12 +410,26 @@ async function createCommissionFromPayload(payload, options = {}) {
       const yy = String(now.getFullYear()).slice(2);
       const mm = String(now.getMonth() + 1).padStart(2, '0');
       const prefix = `JC${yy}${mm}`; // e.g. JC2504
+      orderNumberLockName = `order_number_${prefix}`;
+      const [[lockResult]] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [orderNumberLockName]);
+      orderNumberLockAcquired = Number(lockResult?.acquired) === 1;
+      if (!orderNumberLockAcquired) {
+        throw Object.assign(new Error('系统正在分配同月份委托单号，请稍后重试'), { status: 409 });
+      }
 
-      // 查找当前月最大 order_id（加 FOR UPDATE 避免并发）
-      // 注意：MySQL 对 varchar 排序能正常比较带相同前缀且数字零填充的字符串
+      // 同时扫描正式订单和审批时预留的号码，避免自行开单占用已预留号码。
       const [rows] = await conn.query(
-        `SELECT order_id FROM orders WHERE order_id LIKE ? ORDER BY order_id DESC LIMIT 1 FOR UPDATE`,
-        [`${prefix}%`]
+        `SELECT candidate_order_id AS order_id
+         FROM (
+           SELECT order_id AS candidate_order_id FROM orders WHERE order_id LIKE ?
+           UNION ALL
+           SELECT JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) AS candidate_order_id
+           FROM order_requests
+           WHERE JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) LIKE ?
+         ) monthly_numbers
+         ORDER BY CAST(SUBSTRING(candidate_order_id, 7) AS UNSIGNED) DESC
+         LIMIT 1`,
+        [`${prefix}%`, `${prefix}%`]
       );
 
       let nextSeq = 1;
@@ -741,6 +757,9 @@ async function createCommissionFromPayload(payload, options = {}) {
     try { console.error('[commission][POST] error', { message: e.message, status: e.status || 500 }); } catch (_) {}
     throw e;
   } finally {
+    if (orderNumberLockAcquired) {
+      await conn.query('SELECT RELEASE_LOCK(?)', [orderNumberLockName]).catch(() => {});
+    }
     if (ownsConnection) conn.release();
   }
 }

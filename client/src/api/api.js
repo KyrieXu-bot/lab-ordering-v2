@@ -21,6 +21,8 @@ export const login = (username, password) => axios.post('/api/auth/login', { use
 export const getOrderRequests = (params = {}) => axios.get('/api/order-requests', { params })
 export const getOrderRequest = (id) => axios.get(`/api/order-requests/${id}`)
 export const createOrderRequest = (payload) => axios.post('/api/order-requests', { payload })
+export const createOrderFollowUp = (id, requestType, payload) =>
+  axios.post(`/api/order-requests/${id}/follow-up`, { request_type: requestType, payload })
 export const updateOrderRequest = (id, payload, version) =>
   axios.put(`/api/order-requests/${id}`, { payload, version })
 export const getOrderRequestFiles = (id) => axios.get(`/api/order-requests/${id}/files`)
@@ -35,8 +37,10 @@ export const deleteOrderRequestFile = (requestId, fileId) =>
   axios.delete(`/api/order-requests/${requestId}/files/${fileId}`)
 export const withdrawOrderRequest = (id) => axios.post(`/api/order-requests/${id}/withdraw`)
 export const returnOrderRequest = (id, note) => axios.post(`/api/order-requests/${id}/return`, { note })
-export const approveOrderRequest = (id, payload, note = '', version) =>
-  axios.post(`/api/order-requests/${id}/approve`, { payload, note, version })
+export const approveOrderRequest = (id, note = '', version) =>
+  axios.post(`/api/order-requests/${id}/approve`, { note, version })
+export const openOrderRequest = (id, payload, version) =>
+  axios.post(`/api/order-requests/${id}/open`, { payload, version })
 export const generateOrderRequestPdf = (id) =>
   axios.post(`/api/order-requests/${id}/generate-pdf`)
 export const downloadOrderRequestAttachment = (id) =>
@@ -61,6 +65,18 @@ export const getSalespersonSignature = (userId) =>
     params: { refresh: Date.now() },
     responseType: 'blob'
   })
+export const getCommissionerSignature = (commissionerId) =>
+  axios.get(`/api/commissioner-signatures/${encodeURIComponent(commissionerId)}`, {
+    params: { refresh: Date.now() },
+    responseType: 'blob'
+  })
+export const uploadCommissionerSignature = (commissionerId, file) => {
+  const formData = new FormData()
+  formData.append('signature', file)
+  return axios.post(`/api/commissioner-signatures/${encodeURIComponent(commissionerId)}`, formData)
+}
+export const deleteCommissionerSignature = (commissionerId) =>
+  axios.delete(`/api/commissioner-signatures/${encodeURIComponent(commissionerId)}`)
 
 export const getCustomers = (customerNameTerm, contactNameTerm, contactPhoneTerm) =>
   axios.get('/api/form/customers', { params: {

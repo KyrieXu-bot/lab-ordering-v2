@@ -4,7 +4,7 @@ const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
 const { signaturePathForUser } = require('./salesSignature');
 
-const templatePath = path.join(__dirname, '..', '..', 'templates', 'order_template.docx');
+const templatePath = path.join(__dirname, '..', '..', 'templates', 'order_template_2026.docx');
 
 function escapeXml(value) {
   return String(value || '')
@@ -125,7 +125,7 @@ async function injectRepresentativeSignature(zip, templateData) {
     signatureContent = textRun(representativeName ? ` ${representativeName} ` : '                    ', { underline: true });
   }
 
-  const dateContent = signatureDate ? textRun(`  ${signatureDate}`, { underline: true }) : '';
+  const dateContent = signatureDate ? textRun(`  ${signatureDate}`) : '';
   paragraphXml = paragraphXml.replace('</w:p>', `${signatureContent}${dateContent}</w:p>`);
   documentXml = `${documentXml.slice(0, paragraphStart)}${paragraphXml}${documentXml.slice(paragraphEnd + 6)}`;
   zip.file('word/document.xml', documentXml);
@@ -136,8 +136,13 @@ async function generateOrderTemplateBuffer(templateData) {
   if (!templateBuffer.length) throw new Error('委托单模板文件为空');
   const zip = new PizZip(templateBuffer);
   const doc = new Docxtemplater(zip);
-  doc.render(templateData);
-  await injectRepresentativeSignature(doc.getZip(), templateData);
+  const renderData = {
+    ...templateData,
+    // 2026 版正式模板采用 commissioner_name；保留旧字段可兼容现有前端和历史申请 JSON。
+    commissioner_name: templateData?.commissioner_name || templateData?.customer_name || ''
+  };
+  doc.render(renderData);
+  await injectRepresentativeSignature(doc.getZip(), renderData);
   return doc.getZip().generate({ type: 'nodebuffer' });
 }
 

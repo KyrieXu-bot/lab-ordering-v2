@@ -12,6 +12,22 @@ function buildSampleFlowScanUrl(flowToken) {
   return `${baseUrl}${separator}token=${encodeURIComponent(flowToken)}`;
 }
 
+function calculateQrPlacement(pageWidth, pageHeight, options = {}) {
+  // 对应 2026 版模板页眉：二维码位于“任务编号 Task number”区域左侧。
+  // 纵向首页、横向附录首页和横向续页使用不同页眉，因此分别保留右侧空间。
+  const qrSize = 15 * MM_TO_POINTS;
+  const topMargin = 7 * MM_TO_POINTS;
+  const isLandscape = pageWidth > pageHeight;
+  const reservedWidthMm = !isLandscape ? 56 : (options.isFirstLandscapePage ? 71 : 86);
+  const rightSideReservedWidth = reservedWidthMm * MM_TO_POINTS;
+
+  return {
+    x: Math.max(10, pageWidth - rightSideReservedWidth - qrSize),
+    y: Math.max(10, pageHeight - topMargin - qrSize),
+    size: qrSize
+  };
+}
+
 async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   const scanUrl = buildSampleFlowScanUrl(flowToken);
   const qrBuffer = await QRCode.toBuffer(scanUrl, {
@@ -26,20 +42,19 @@ async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   const pdf = await PDFDocument.load(source);
   const qrImage = await pdf.embedPng(qrBuffer);
 
-  // 约 15 mm：略高于页脚两行文字，同时保留足够的打印扫码清晰度。
-  const qrSize = 15 * MM_TO_POINTS;
-  const rightMargin = 30;
-  const footerTextWidth = 92;
-  const gap = 8;
-  const bottom = 20;
-
+  let landscapePageCount = 0;
   for (const page of pdf.getPages()) {
-    const { width } = page.getSize();
+    const { width, height } = page.getSize();
+    const isLandscape = width > height;
+    const placement = calculateQrPlacement(width, height, {
+      isFirstLandscapePage: isLandscape && landscapePageCount === 0
+    });
+    if (isLandscape) landscapePageCount += 1;
     page.drawImage(qrImage, {
-      x: Math.max(10, width - rightMargin - footerTextWidth - gap - qrSize),
-      y: bottom,
-      width: qrSize,
-      height: qrSize
+      x: placement.x,
+      y: placement.y,
+      width: placement.size,
+      height: placement.size
     });
   }
 
@@ -47,4 +62,4 @@ async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   return { scanUrl, pageCount: pdf.getPageCount() };
 }
 
-module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl };
+module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl, calculateQrPlacement };

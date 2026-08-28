@@ -13,6 +13,7 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   namedPlaceholders: true,
-  timezone: 'Z',
+  // MySQL 会话使用北京时间；按 +08:00 解析 DATETIME，避免返回前端后再次多加 8 小时。
+  timezone: process.env.DB_TIMEZONE || '+08:00',
 });
 module.exports = pool ;
