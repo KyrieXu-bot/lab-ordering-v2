@@ -1,9 +1,37 @@
 // server/src/routes/commission.js
 const express = require('express');
+const path = require('path');
+const fs = require('fs').promises;
 const pool = require('../db');
 const { requireReviewer } = require('../middleware/auth');
 const { signatureExists } = require('../services/salesSignature');
+const { monthPrefixForChoice, nextReviewerCreatedOrderId } = require('../services/orderNumberAllocation');
+const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
+const { convertDocxToPdf } = require('../services/pdfConversion');
+const { addSampleFlowQrToPdf } = require('../services/sampleFlowQr');
 const router = express.Router();
+
+function safeFilePart(value, fallback = '未填写') {
+  const text = String(value || fallback).trim();
+  return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
+}
+
+async function nextDirectPdfPaths(absoluteDir, baseName) {
+  for (let version = 0; version < 10000; version += 1) {
+    const suffix = version ? `(${version})` : '';
+    const storageBaseName = `${baseName}${suffix}`;
+    const pdfPath = path.join(absoluteDir, `${storageBaseName}.pdf`);
+    try {
+      await fs.access(pdfPath);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        return { storageBaseName, docxPath: path.join(absoluteDir, `${storageBaseName}.docx`), pdfPath };
+      }
+      throw error;
+    }
+  }
+  throw new Error('该委托单的 PDF 历史版本数量过多，无法继续生成');
+}
 
 /**
  * 预填：根据委托单号读取
@@ -133,6 +161,7 @@ router.get('/', async (req, res, next) => {
       }
       
       return {
+        test_item_id: ti.test_item_id,
         sample_name: ti.sample_name || '',
         material: ti.material || '',
         sample_type: ti.sample_type || '',
@@ -154,7 +183,8 @@ router.get('/', async (req, res, next) => {
         arrival_mode: ti.arrival_mode || '',
         sample_arrival_status: ti.sample_arrival_status || 'arrived',
         service_urgency: ti.service_urgency || 'normal',
-        seq_no: ti.seq_no != null && ti.seq_no !== '' ? Number(ti.seq_no) : null
+        seq_no: ti.seq_no != null && ti.seq_no !== '' ? Number(ti.seq_no) : null,
+        is_add_on: Number(ti.is_add_on) === 1
       };
     });
 
@@ -406,10 +436,10 @@ async function createCommissionFromPayload(payload, options = {}) {
       if (ex) throw Object.assign(new Error('委托单号已存在'), { status: 400 });
     } else {
       // 生成新单号：JC + yyMM + 4位序号（从0001开始），在事务内使用 FOR UPDATE 锁同月已有最大单号以避免并发冲突
-      const now = new Date();
-      const yy = String(now.getFullYear()).slice(2);
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const prefix = `JC${yy}${mm}`; // e.g. JC2504
+      const requestedMonthChoice = ['previous', 'current', 'next'].includes(orderInfo.order_month_preference?.choice)
+        ? orderInfo.order_month_preference.choice
+        : 'current';
+      const prefix = monthPrefixForChoice(new Date(), requestedMonthChoice);
       orderNumberLockName = `order_number_${prefix}`;
       const [[lockResult]] = await conn.query('SELECT GET_LOCK(?, 5) AS acquired', [orderNumberLockName]);
       orderNumberLockAcquired = Number(lockResult?.acquired) === 1;
@@ -417,30 +447,25 @@ async function createCommissionFromPayload(payload, options = {}) {
         throw Object.assign(new Error('系统正在分配同月份委托单号，请稍后重试'), { status: 409 });
       }
 
-      // 同时扫描正式订单和审批时预留的号码，避免自行开单占用已预留号码。
+      // 自行开单只考虑正式订单和已经审批分配的预留号；未审批申请不占号。
       const [rows] = await conn.query(
-        `SELECT candidate_order_id AS order_id
+        `SELECT candidate_order_id AS order_id, source_type
          FROM (
-           SELECT order_id AS candidate_order_id FROM orders WHERE order_id LIKE ?
+           SELECT order_id AS candidate_order_id, 'formal' AS source_type FROM orders WHERE order_id LIKE ?
            UNION ALL
-           SELECT JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) AS candidate_order_id
+           SELECT JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) AS candidate_order_id,
+                  'approved_reservation' AS source_type
            FROM order_requests
-           WHERE JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) LIKE ?
-         ) monthly_numbers
-         ORDER BY CAST(SUBSTRING(candidate_order_id, 7) AS UNSIGNED) DESC
-         LIMIT 1`,
+           WHERE status = 'approved'
+             AND JSON_UNQUOTE(JSON_EXTRACT(reviewed_payload, '$.workflow.reservedOrderId')) LIKE ?
+         ) monthly_numbers`,
         [`${prefix}%`, `${prefix}%`]
       );
-
-      let nextSeq = 1;
-      if (rows && rows[0] && rows[0].order_id) {
-        const last = rows[0].order_id;
-        const lastSeqStr = last.slice(prefix.length); // 剩下的数字部分
-        const lastSeqNum = parseInt(lastSeqStr, 10);
-        if (!isNaN(lastSeqNum)) nextSeq = lastSeqNum + 1;
-      }
-      // 用 4 位序号（如 0001, 0002, ...）
-      order_id = `${prefix}${String(nextSeq).padStart(4, '0')}`; // e.g. JC25040001
+      order_id = nextReviewerCreatedOrderId({
+        prefix,
+        formalOrderIds: rows.filter((row) => row.source_type === 'formal').map((row) => row.order_id),
+        approvedReservedOrderIds: rows.filter((row) => row.source_type === 'approved_reservation').map((row) => row.order_id)
+      });
     }
 
     // 创建订单（created_by 暂用 assignmentAccount 或 'LX001'）
@@ -771,6 +796,85 @@ router.post('/', requireReviewer, async (req, res, next) => {
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
     next(error);
+  }
+});
+
+router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) => {
+  const conn = await pool.getConnection();
+  const createdPaths = [];
+  let lockName = null;
+  let lockAcquired = false;
+  let committed = false;
+  try {
+    const orderNum = String(req.params.orderNum || '').trim();
+    const templateData = req.body?.templateData;
+    if (!orderNum || !templateData || typeof templateData !== 'object') {
+      return res.status(400).json({ message: '缺少委托单号或 PDF 模板数据' });
+    }
+    if (String(templateData.order_num || '').trim() !== orderNum) {
+      return res.status(400).json({ message: 'PDF 模板中的委托单号与当前委托单不一致' });
+    }
+
+    const [[order]] = await conn.query('SELECT order_id FROM orders WHERE order_id = ?', [orderNum]);
+    if (!order) return res.status(404).json({ message: '正式委托单不存在' });
+    const [testItems] = await conn.query(
+      'SELECT test_item_id FROM test_items WHERE order_id = ? ORDER BY test_item_id',
+      [orderNum]
+    );
+    if (!testItems.length) return res.status(409).json({ message: '正式委托单下没有检测项目，无法关联 PDF 附件' });
+
+    lockName = `direct_order_pdf_${orderNum}`;
+    const [[lockResult]] = await conn.query('SELECT GET_LOCK(?, 0) AS acquired', [lockName]);
+    lockAcquired = Number(lockResult?.acquired) === 1;
+    if (!lockAcquired) return res.status(409).json({ message: '该委托单正在生成 PDF，请稍后重试' });
+
+    const orderId = safeFilePart(orderNum, '委托单');
+    const customerName = safeFilePart(templateData.customer_name, '委托方');
+    const contactName = safeFilePart(templateData.customer_contactName, '联系人');
+    const baseName = `${orderId}-${customerName}-${contactName}`;
+    const absoluteDir = path.join(__dirname, '..', '..', 'uploads', 'direct-orders', orderId);
+    await fs.mkdir(absoluteDir, { recursive: true });
+    const { storageBaseName, docxPath, pdfPath } = await nextDirectPdfPaths(absoluteDir, baseName);
+    createdPaths.push(docxPath, pdfPath);
+
+    await fs.writeFile(docxPath, await generateOrderTemplateBuffer(templateData));
+    await convertDocxToPdf(docxPath, pdfPath);
+    await addSampleFlowQrToPdf(pdfPath, `DIRECT_${orderNum}`);
+    const pdfStat = await fs.stat(pdfPath);
+    if (!pdfStat.size) throw new Error('生成的 PDF 文件为空');
+
+    const filename = `${baseName}.pdf`;
+    const projectFilepath = pdfPath.replace(/\\/g, '/');
+    await conn.beginTransaction();
+    await conn.query(
+      `DELETE FROM project_files
+       WHERE order_id = ? AND category = 'order_attachment' AND filename = ?`,
+      [orderNum, filename]
+    );
+    for (const testItem of testItems) {
+      await conn.query(
+        `INSERT INTO project_files
+          (category, filename, filepath, order_id, test_item_id, sample_id, uploaded_by)
+         VALUES ('order_attachment', ?, ?, ?, ?, NULL, ?)`,
+        [filename, projectFilepath, orderNum, testItem.test_item_id, req.user.user_id]
+      );
+    }
+    await conn.commit();
+    committed = true;
+    await fs.rm(docxPath, { force: true }).catch(() => {});
+
+    res.type('application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.setHeader('X-Generated-Filename', encodeURIComponent(filename));
+    res.sendFile(pdfPath);
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    if (!committed) await Promise.all(createdPaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    next(error);
+  } finally {
+    if (lockAcquired) await conn.query('SELECT RELEASE_LOCK(?)', [lockName]).catch(() => {});
+    conn.release();
   }
 });
 

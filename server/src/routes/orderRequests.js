@@ -8,10 +8,13 @@ const { requireSales, requireReviewer, isReviewer } = require('../middleware/aut
 const { createCommissionFromPayload } = require('./commission');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
-const { addSampleFlowQrToPdf } = require('../services/sampleFlowQr');
+const { addSampleFlowQrToPdf, sampleFlowTokenPersistencePlan } = require('../services/sampleFlowQr');
+const { appendRequestImagesToPdf, detectSupportedImageType } = require('../services/orderAttachmentImages');
 const { syncRequestSalesperson } = require('../services/salesSignature');
+const { commissionerSignatureExists } = require('../services/commissionerSignature');
 const { buildOrderRequestPdfTemplateData } = require('../services/orderRequestPdfData');
-const { applyOrderModification, appendOrderTestItems } = require('../services/orderFollowUp');
+const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow } = require('../services/orderFollowUp');
+const { buildProcessTemplateData, generateProcessTemplateBuffer } = require('../services/processTemplate');
 const {
   allocateOrderId,
   buildApprovedPayload,
@@ -88,8 +91,31 @@ async function nextVersionedPdfPaths(absoluteDir, baseName) {
   throw new Error('该委托单的 PDF 历史版本数量过多，无法继续生成');
 }
 
-function canAccessRequest(row, user) {
-  return isReviewer(user) || row.applicant_user_id === user.user_id;
+async function canAccessRequest(row, user, connection = pool) {
+  if (isReviewer(user) || row.applicant_user_id === user.user_id) return true;
+  const requestId = row.request_id;
+  if (!requestId) return false;
+  const [[ownedByUser]] = await connection.query(
+    `SELECT 1 AS allowed
+     FROM order_requests access_request
+     JOIN payers access_payer ON access_payer.payer_id = access_request.payer_id
+     WHERE access_request.request_id = ? AND access_payer.owner_user_id = ?
+     LIMIT 1`,
+    [requestId, user.user_id]
+  );
+  return Boolean(ownedByUser);
+}
+
+function workflowStatusSql(alias = 'r') {
+  return `(CASE
+    WHEN ${alias}.status = 'approved' AND (
+      (${alias}.request_type = 'normal' AND ${alias}.approved_order_id IS NOT NULL)
+      OR (${alias}.request_type = 'modification')
+      OR (${alias}.request_type = 'additional_test' AND ${alias}.applied_at IS NOT NULL)
+    ) THEN 'opened'
+    WHEN ${alias}.status = 'approved' THEN 'pending_open'
+    ELSE ${alias}.status
+  END)`;
 }
 
 async function addEvent(conn, requestId, userId, eventType, note = null) {
@@ -104,7 +130,7 @@ async function linkRequestFilesToLims(conn, requestId, orderId) {
   const [requestFiles] = await conn.query(
     `SELECT original_filename, stored_path, created_by
      FROM order_request_files
-     WHERE request_id = ? AND file_type = 'user_upload'
+     WHERE request_id = ? AND file_type IN ('user_upload', 'test_requirement')
      ORDER BY file_id`,
     [requestId]
   );
@@ -127,17 +153,70 @@ async function linkRequestFilesToLims(conn, requestId, orderId) {
   }
 }
 
+async function attachCurrentOrderPdfs(rows) {
+  const orderIds = [...new Set(rows
+    .map((row) => String(row.approved_order_id || '').trim())
+    .filter(Boolean))];
+  if (!orderIds.length) return rows;
+
+  const [pdfRows] = await pool.query(
+    `SELECT COALESCE(owner_request.approved_order_id, owner_request.target_order_id) AS order_id,
+            owner_request.request_id AS pdf_request_id,
+            f.file_id AS pdf_file_id, f.original_filename AS pdf_filename
+     FROM order_request_files f
+     JOIN order_requests owner_request ON owner_request.request_id = f.request_id
+     WHERE f.file_type = 'application_pdf'
+       AND COALESCE(owner_request.approved_order_id, owner_request.target_order_id)
+         IN (${orderIds.map(() => '?').join(',')})
+       AND EXISTS (
+         SELECT 1 FROM project_files pf
+         WHERE pf.order_id = COALESCE(owner_request.approved_order_id, owner_request.target_order_id)
+           AND pf.category = 'order_attachment'
+           AND pf.filepath LIKE CONCAT('%/', f.stored_path)
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM order_requests newer_change
+         WHERE newer_change.target_order_id = COALESCE(owner_request.approved_order_id, owner_request.target_order_id)
+           AND newer_change.request_type = 'modification' AND newer_change.status = 'approved'
+           AND newer_change.reviewed_at > f.created_at
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM order_requests newer_addition
+         WHERE newer_addition.target_order_id = COALESCE(owner_request.approved_order_id, owner_request.target_order_id)
+           AND newer_addition.request_type = 'additional_test' AND newer_addition.status = 'approved'
+           AND newer_addition.applied_at IS NOT NULL AND newer_addition.applied_at > f.created_at
+       )
+     ORDER BY f.created_at DESC, f.file_id DESC`,
+    orderIds
+  );
+  const pdfByOrder = new Map();
+  pdfRows.forEach((pdfRow) => {
+    const key = String(pdfRow.order_id);
+    if (!pdfByOrder.has(key)) pdfByOrder.set(key, pdfRow);
+  });
+  return rows.map((row) => {
+    const pdfRow = pdfByOrder.get(String(row.approved_order_id || '').trim());
+    return pdfRow ? {
+      ...row,
+      order_pdf_request_id: pdfRow.pdf_request_id,
+      order_pdf_file_id: pdfRow.pdf_file_id,
+      order_pdf_filename: pdfRow.pdf_filename
+    } : row;
+  });
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const reviewer = isReviewer(req.user);
     const paginationRequested = req.query.page !== undefined || req.query.page_size !== undefined;
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, Number.parseInt(req.query.page_size, 10) || 20));
-    const allowedStatuses = new Set(['submitted', 'approved', 'returned', 'withdrawn']);
+    const allowedStatuses = new Set(['submitted', 'pending_open', 'opened', 'returned', 'withdrawn']);
     const requestedStatus = String(req.query.status || '').trim();
     const keyword = String(req.query.keyword || '').trim().slice(0, 100);
     const reservedOrderSql = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.workflow.reservedOrderId')), 'null')`;
     const displayOrderSql = `COALESCE(r.approved_order_id, r.target_order_id, ${reservedOrderSql})`;
+    const displayStatusSql = workflowStatusSql('r');
     if (requestedStatus && !allowedStatuses.has(requestedStatus)) {
       return res.status(400).json({ message: '申请状态筛选值不正确' });
     }
@@ -145,8 +224,11 @@ router.get('/', async (req, res, next) => {
     const baseConditions = [];
     const baseParams = [];
     if (!reviewer) {
-      baseConditions.push('r.applicant_user_id = ?');
-      baseParams.push(req.user.user_id);
+      baseConditions.push(`(r.applicant_user_id = ? OR EXISTS (
+        SELECT 1 FROM payers access_payer
+        WHERE access_payer.payer_id = r.payer_id AND access_payer.owner_user_id = ?
+      ))`);
+      baseParams.push(req.user.user_id, req.user.user_id);
     }
     if (keyword) {
       const fuzzyKeyword = `%${keyword}%`;
@@ -163,13 +245,24 @@ router.get('/', async (req, res, next) => {
           WHERE search_customer.customer_id = r.customer_id
             AND search_customer.customer_name LIKE ?
         )
+        OR EXISTS (
+          SELECT 1 FROM commissioners search_contact
+          WHERE search_contact.commissioner_id = r.commissioner_id
+            AND search_contact.contact_name LIKE ?
+        )
+        OR EXISTS (
+          SELECT 1 FROM payers search_payer
+          JOIN users search_salesperson ON search_salesperson.user_id = search_payer.owner_user_id
+          WHERE search_payer.payer_id = r.payer_id
+            AND search_salesperson.name LIKE ?
+        )
       )`);
-      baseParams.push(fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword);
+      baseParams.push(fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword);
     }
     const conditions = [...baseConditions];
     const params = [...baseParams];
     if (reviewer && requestedStatus) {
-      conditions.push('r.status = ?');
+      conditions.push(`${displayStatusSql} = ?`);
       params.push(requestedStatus);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -198,7 +291,7 @@ router.get('/', async (req, res, next) => {
 
     if (!reviewer && String(req.query.grouped || '') === '1') {
       const groupKeySql = `COALESCE(${displayOrderSql}, CONCAT('REQUEST-', r.request_id))`;
-      const groupStatusSql = `SUBSTRING_INDEX(GROUP_CONCAT(r.status ORDER BY r.submitted_at DESC, r.request_id DESC), ',', 1)`;
+      const groupStatusSql = `SUBSTRING_INDEX(GROUP_CONCAT(${displayStatusSql} ORDER BY r.submitted_at DESC, r.request_id DESC), ',', 1)`;
       const groupHavingSql = requestedStatus ? `HAVING ${groupStatusSql} = ?` : '';
       const groupLimitSql = paginationRequested ? 'LIMIT ? OFFSET ?' : '';
       const groupedBaseParams = requestedStatus ? [...params, requestedStatus] : params;
@@ -215,30 +308,42 @@ router.get('/', async (req, res, next) => {
       const groupKeys = groupRows.map(row => row.group_key);
       let groupedItems = [];
       if (groupKeys.length) {
-        const groupedConditions = ['r.applicant_user_id = ?', `${groupKeySql} IN (${groupKeys.map(() => '?').join(',')})`];
+        const groupedConditions = [`(r.applicant_user_id = ? OR EXISTS (
+          SELECT 1 FROM payers grouped_access_payer
+          WHERE grouped_access_payer.payer_id = r.payer_id AND grouped_access_payer.owner_user_id = ?
+        ))`, `${groupKeySql} IN (${groupKeys.map(() => '?').join(',')})`];
         const [groupedRows] = await pool.query(
           `SELECT r.request_id, r.applicant_user_id, applicant.name AS applicant_name,
                   r.reviewer_user_id, reviewer.name AS reviewer_name, r.status,
                   r.request_type, r.parent_request_id, r.root_request_id, r.target_order_id,
                   r.customer_id, r.payer_id, r.commissioner_id,
                   COALESCE(m.commissioner_name, c.customer_name) AS customer_name,
+                  m.contact_name AS commissioner_contact_name,
+                  salesperson.name AS salesperson_name,
                   r.review_note, ${displayOrderSql} AS approved_order_id,
                   (CASE
                     WHEN r.request_type = 'normal' THEN r.approved_order_id IS NOT NULL
                     WHEN r.request_type = 'modification' THEN r.status = 'approved'
                     ELSE r.applied_at IS NOT NULL
                   END) AS order_opened, r.version,
+                  ${displayStatusSql} AS display_status,
                   r.attachment_file_id, f.original_filename AS attachment_filename,
-                  (EXISTS(SELECT 1 FROM project_files pf WHERE pf.order_id = COALESCE(r.approved_order_id, r.target_order_id)
-                    AND pf.category = 'order_attachment' AND pf.test_item_id IS NOT NULL
-                    AND pf.filepath LIKE CONCAT('%/', f.stored_path))
+                  (SELECT requirement_file.file_id FROM order_request_files requirement_file
+                   WHERE requirement_file.request_id = r.request_id
+                     AND requirement_file.file_type IN ('test_requirement', 'user_upload')
+                   ORDER BY requirement_file.file_id DESC LIMIT 1) AS requirement_file_id,
+                  (SELECT requirement_file.original_filename FROM order_request_files requirement_file
+                   WHERE requirement_file.request_id = r.request_id
+                     AND requirement_file.file_type IN ('test_requirement', 'user_upload')
+                   ORDER BY requirement_file.file_id DESC LIMIT 1) AS requirement_filename,
+                  (f.file_type = 'application_pdf'
                    AND NOT EXISTS(SELECT 1 FROM order_requests newer_change
                     WHERE newer_change.target_order_id = COALESCE(r.approved_order_id, r.target_order_id) AND newer_change.request_type = 'modification'
                       AND newer_change.status = 'approved' AND newer_change.reviewed_at > f.created_at)
                    AND NOT EXISTS(SELECT 1 FROM order_requests newer_addition
                     WHERE newer_addition.target_order_id = COALESCE(r.approved_order_id, r.target_order_id)
                       AND newer_addition.request_type = 'additional_test' AND newer_addition.status = 'approved'
-                      AND newer_addition.reviewed_at > f.created_at)) AS pdf_generated,
+                      AND newer_addition.applied_at IS NOT NULL AND newer_addition.applied_at > f.created_at)) AS pdf_generated,
                   ${urgencySql} AS order_urgency_type, ${groupKeySql} AS group_key,
                   r.created_at, r.submitted_at, r.reviewed_at, r.withdrawn_at, r.updated_at
            FROM order_requests r
@@ -246,10 +351,12 @@ router.get('/', async (req, res, next) => {
            LEFT JOIN users reviewer ON reviewer.user_id = r.reviewer_user_id
            LEFT JOIN commissioners m ON m.commissioner_id = r.commissioner_id
            LEFT JOIN customers c ON c.customer_id = r.customer_id
+           LEFT JOIN payers payer ON payer.payer_id = r.payer_id
+           LEFT JOIN users salesperson ON salesperson.user_id = payer.owner_user_id
            LEFT JOIN order_request_files f ON f.file_id = r.attachment_file_id
            WHERE ${groupedConditions.join(' AND ')}
            ORDER BY r.submitted_at DESC, r.request_id DESC`,
-          [req.user.user_id, ...groupKeys]
+          [req.user.user_id, req.user.user_id, ...groupKeys]
         );
         const groupOrder = new Map(groupKeys.map((key, index) => [String(key), index]));
         groupedItems = groupedRows
@@ -274,20 +381,25 @@ router.get('/', async (req, res, next) => {
               r.request_type, r.parent_request_id, r.root_request_id, r.target_order_id,
               r.customer_id, r.payer_id, r.commissioner_id,
               COALESCE(m.commissioner_name, c.customer_name) AS customer_name,
+              m.contact_name AS commissioner_contact_name,
+              salesperson.name AS salesperson_name,
               r.review_note, ${displayOrderSql} AS approved_order_id,
               (CASE
                 WHEN r.request_type = 'normal' THEN r.approved_order_id IS NOT NULL
                 WHEN r.request_type = 'modification' THEN r.status = 'approved'
                 ELSE r.applied_at IS NOT NULL
               END) AS order_opened, r.version,
+              ${displayStatusSql} AS display_status,
               r.attachment_file_id, f.original_filename AS attachment_filename,
-              (EXISTS(
-                SELECT 1 FROM project_files pf
-                WHERE pf.order_id = COALESCE(r.approved_order_id, r.target_order_id)
-                  AND pf.category = 'order_attachment'
-                  AND pf.test_item_id IS NOT NULL
-                  AND pf.filepath LIKE CONCAT('%/', f.stored_path)
-              ) AND NOT EXISTS(
+              (SELECT requirement_file.file_id FROM order_request_files requirement_file
+               WHERE requirement_file.request_id = r.request_id
+                 AND requirement_file.file_type IN ('test_requirement', 'user_upload')
+               ORDER BY requirement_file.file_id DESC LIMIT 1) AS requirement_file_id,
+              (SELECT requirement_file.original_filename FROM order_request_files requirement_file
+               WHERE requirement_file.request_id = r.request_id
+                 AND requirement_file.file_type IN ('test_requirement', 'user_upload')
+               ORDER BY requirement_file.file_id DESC LIMIT 1) AS requirement_filename,
+              (f.file_type = 'application_pdf' AND NOT EXISTS(
                 SELECT 1 FROM order_requests newer_change
                 WHERE newer_change.target_order_id = COALESCE(r.approved_order_id, r.target_order_id)
                   AND newer_change.request_type = 'modification' AND newer_change.status = 'approved'
@@ -296,7 +408,7 @@ router.get('/', async (req, res, next) => {
                 SELECT 1 FROM order_requests newer_addition
                 WHERE newer_addition.target_order_id = COALESCE(r.approved_order_id, r.target_order_id)
                   AND newer_addition.request_type = 'additional_test' AND newer_addition.status = 'approved'
-                  AND newer_addition.reviewed_at > f.created_at
+                  AND newer_addition.applied_at IS NOT NULL AND newer_addition.applied_at > f.created_at
               )) AS pdf_generated,
               ${urgencySql} AS order_urgency_type,
               r.created_at, r.submitted_at, r.reviewed_at, r.withdrawn_at, r.updated_at
@@ -305,27 +417,31 @@ router.get('/', async (req, res, next) => {
        LEFT JOIN users reviewer ON reviewer.user_id = r.reviewer_user_id
        LEFT JOIN commissioners m ON m.commissioner_id = r.commissioner_id
        LEFT JOIN customers c ON c.customer_id = r.customer_id
+       LEFT JOIN payers payer ON payer.payer_id = r.payer_id
+       LEFT JOIN users salesperson ON salesperson.user_id = payer.owner_user_id
        LEFT JOIN order_request_files f ON f.file_id = r.attachment_file_id
        ${where}
        ${orderBy}
        ${limitSql}`,
       listParams
     );
-    const items = rows.map((row) => ({ ...row, request_no: requestNumber(row.request_id) }));
+    const items = await attachCurrentOrderPdfs(
+      rows.map((row) => ({ ...row, request_no: requestNumber(row.request_id) }))
+    );
     if (!paginationRequested) return res.json(items);
 
     const [[totalRows], [statusRows]] = await Promise.all([
       pool.query(`SELECT COUNT(*) AS total FROM order_requests r ${where}`, params),
       pool.query(
-        `SELECT r.status, COUNT(*) AS total
+        `SELECT ${displayStatusSql} AS status, COUNT(*) AS total
          FROM order_requests r
          ${baseWhere}
-         GROUP BY r.status`,
+         GROUP BY ${displayStatusSql}`,
         baseParams
       )
     ]);
     const total = Number(totalRows[0]?.total || 0);
-    const counts = { submitted: 0, approved: 0, returned: 0, withdrawn: 0 };
+    const counts = { submitted: 0, pending_open: 0, opened: 0, returned: 0, withdrawn: 0 };
     statusRows.forEach((row) => { counts[row.status] = Number(row.total || 0); });
     return res.json({
       items,
@@ -350,6 +466,9 @@ router.post('/', requireSales, async (req, res, next) => {
       return res.status(400).json({ message: '申请内容格式不正确' });
     }
     if (!templateData) return res.status(400).json({ message: '缺少委托单模板数据' });
+    if (!await commissionerSignatureExists(commissionData.commissionerId)) {
+      return res.status(409).json({ message: '该委托方尚未配置电子签名，请先上传签名后再提交' });
+    }
     const salesperson = await syncRequestSalesperson(conn, requestPayload, { refreshSignatureDate: true });
     if (!salesperson) return res.status(400).json({ message: '所选付款方未绑定有效的服务方联系人，无法添加电子签名' });
 
@@ -511,10 +630,10 @@ router.get('/:id/files', async (req, res, next) => {
       [req.params.id]
     );
     if (!requestRow) return res.status(404).json({ message: '申请不存在' });
-    if (!canAccessRequest(requestRow, req.user)) return res.status(403).json({ message: '无权查看该申请附件' });
+    if (!await canAccessRequest(requestRow, req.user)) return res.status(403).json({ message: '无权查看该申请附件' });
 
     const [files] = await pool.query(
-      `SELECT f.file_id, f.original_filename, f.mime_type, f.file_size, f.created_at,
+      `SELECT f.file_id, f.file_type, f.original_filename, f.mime_type, f.file_size, f.created_at,
               EXISTS(
                 SELECT 1 FROM project_files pf
                 WHERE pf.order_id = COALESCE(r.approved_order_id, r.target_order_id)
@@ -523,8 +642,8 @@ router.get('/:id/files', async (req, res, next) => {
               ) AS linked_to_lims
        FROM order_request_files f
        JOIN order_requests r ON r.request_id = f.request_id
-       WHERE f.request_id = ? AND f.file_type = 'user_upload'
-         AND (COALESCE(r.approved_order_id, r.target_order_id) IS NULL OR EXISTS(
+       WHERE f.request_id = ? AND f.file_type IN ('user_upload', 'test_requirement', 'request_image')
+         AND (f.file_type = 'request_image' OR r.applied_at IS NULL OR COALESCE(r.approved_order_id, r.target_order_id) IS NULL OR EXISTS(
            SELECT 1 FROM project_files visible_pf
            WHERE visible_pf.order_id = COALESCE(r.approved_order_id, r.target_order_id)
              AND visible_pf.category = 'order_attachment'
@@ -554,13 +673,23 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
       [req.params.id]
     );
     if (!row) throw Object.assign(new Error('申请不存在'), { status: 404 });
-    if (!canAccessRequest(row, req.user)) throw Object.assign(new Error('无权上传该申请附件'), { status: 403 });
+    if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权上传该申请附件'), { status: 403 });
     const reviewer = isReviewer(req.user);
     const canUpload = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
     if (!canUpload) throw Object.assign(new Error('当前申请状态不能上传附件'), { status: 409 });
 
+    const attachmentKind = String(req.body?.kind || 'test_requirement').trim();
+    if (!['test_requirement', 'request_image'].includes(attachmentKind)) {
+      throw Object.assign(new Error('附件分类不正确'), { status: 400 });
+    }
+    const detectedImage = attachmentKind === 'request_image' ? detectSupportedImageType(req.file.buffer) : null;
+    if (attachmentKind === 'request_image' && !detectedImage) {
+      throw Object.assign(new Error('附件图片仅支持 PNG、JPG 或 JPEG 格式'), { status: 415 });
+    }
     const originalFilename = cleanOriginalFilename(req.file.originalname);
-    const rawExtension = path.extname(originalFilename).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 12);
+    const rawExtension = attachmentKind === 'request_image'
+      ? detectedImage.extension
+      : path.extname(originalFilename).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 12);
     const storedFilename = `${Date.now()}-${crypto.randomBytes(10).toString('hex')}${rawExtension}`;
     const storedPath = path.posix.join('order-request-attachments', String(row.request_id), storedFilename);
     absolutePath = resolveUploadPath(storedPath);
@@ -570,12 +699,15 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     const [result] = await conn.query(
       `INSERT INTO order_request_files
         (request_id, file_type, original_filename, stored_path, mime_type, file_size, created_by)
-       VALUES (?, 'user_upload', ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         row.request_id,
+        attachmentKind,
         originalFilename,
         storedPath,
-        String(req.file.mimetype || 'application/octet-stream').slice(0, 100),
+        attachmentKind === 'request_image'
+          ? detectedImage.mimeType
+          : String(req.file.mimetype || 'application/octet-stream').slice(0, 100),
         req.file.size,
         req.user.user_id
       ]
@@ -584,8 +716,9 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     await conn.commit();
     res.status(201).json({
       file_id: result.insertId,
+      file_type: attachmentKind,
       original_filename: originalFilename,
-      mime_type: req.file.mimetype || 'application/octet-stream',
+      mime_type: attachmentKind === 'request_image' ? detectedImage.mimeType : (req.file.mimetype || 'application/octet-stream'),
       file_size: req.file.size,
       can_delete: true,
       version: Number(row.version) + 1
@@ -601,8 +734,8 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
 router.get('/:id/files/:fileId/download', async (req, res, next) => {
   try {
     const [[row]] = await pool.query(
-      `SELECT r.applicant_user_id, r.status, r.approved_order_id, r.target_order_id,
-              f.original_filename, f.stored_path, f.mime_type,
+      `SELECT r.request_id, r.applicant_user_id, r.status, r.approved_order_id, r.target_order_id, r.applied_at,
+              f.file_type, f.original_filename, f.stored_path, f.mime_type,
               EXISTS(
                 SELECT 1 FROM project_files pf
                 WHERE pf.order_id = COALESCE(r.approved_order_id, r.target_order_id)
@@ -611,12 +744,14 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
               ) AS linked_to_lims
        FROM order_request_files f
        JOIN order_requests r ON r.request_id = f.request_id
-       WHERE f.request_id = ? AND f.file_id = ? AND f.file_type = 'user_upload'`,
+       WHERE f.request_id = ? AND f.file_id = ?
+         AND f.file_type IN ('user_upload', 'test_requirement', 'request_image')`,
       [uploadsRoot.replace(/\\/g, '/'), req.params.id, req.params.fileId]
     );
     if (!row) return res.status(404).json({ message: '附件不存在' });
-    if (!canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权下载该申请附件' });
-    if ((row.approved_order_id || row.target_order_id) && row.status === 'approved' && !row.linked_to_lims) {
+    if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权下载该申请附件' });
+    if ((row.approved_order_id || row.target_order_id) && row.applied_at && row.status === 'approved'
+        && row.file_type !== 'request_image' && !row.linked_to_lims) {
       return res.status(404).json({ message: '附件已在 LIMS 中删除' });
     }
     const absolutePath = resolveUploadPath(row.stored_path);
@@ -636,18 +771,21 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
   try {
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT r.request_id, r.applicant_user_id, r.status, r.version, f.file_id, f.stored_path
+      `SELECT r.request_id, r.applicant_user_id, r.status, r.version, f.file_id, f.file_type, f.stored_path
        FROM order_requests r
        JOIN order_request_files f ON f.request_id = r.request_id
-       WHERE r.request_id = ? AND f.file_id = ? AND f.file_type = 'user_upload'
+       WHERE r.request_id = ? AND f.file_id = ?
+         AND f.file_type IN ('user_upload', 'test_requirement', 'request_image')
        FOR UPDATE`,
       [req.params.id, req.params.fileId]
     );
     if (!row) throw Object.assign(new Error('附件不存在'), { status: 404 });
-    if (!canAccessRequest(row, req.user)) throw Object.assign(new Error('无权删除该申请附件'), { status: 403 });
+    if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权删除该申请附件'), { status: 403 });
     const reviewer = isReviewer(req.user);
     const canDelete = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
-    if (!canDelete) throw Object.assign(new Error('审批通过后的附件请在 LIMS 中删除'), { status: 409 });
+    if (!canDelete) throw Object.assign(new Error(
+      row.file_type === 'request_image' ? '审批通过后的附件图片不能删除' : '审批通过后的测试需求单请在 LIMS 中删除'
+    ), { status: 409 });
 
     absolutePath = resolveUploadPath(row.stored_path);
     quarantinePath = `${absolutePath}.deleting-${crypto.randomBytes(6).toString('hex')}`;
@@ -688,7 +826,7 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       [req.params.id]
     );
     if (!row) return res.status(404).json({ message: '申请不存在' });
-    if (!canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权生成该委托单 PDF' });
+    if (!await canAccessRequest(row, req.user, conn)) return res.status(403).json({ message: '无权生成该委托单 PDF' });
     const orderIdValue = String(row.approved_order_id || row.target_order_id || '').trim();
     const requestReady = row.status === 'approved'
       && orderIdValue
@@ -821,6 +959,20 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     await fs.writeFile(docxPath, docxBuffer);
     const conversion = await convertDocxToPdf(docxPath, pdfPath);
     const qrResult = await addSampleFlowQrToPdf(pdfPath, sampleFlowToken);
+    const [requestImageFiles] = await conn.query(
+      `SELECT f.original_filename, f.stored_path
+       FROM order_request_files f
+       JOIN order_requests owner_request ON owner_request.request_id = f.request_id
+       WHERE f.file_type = 'request_image' AND owner_request.status = 'approved'
+         AND (owner_request.request_id = ? OR owner_request.approved_order_id = ? OR owner_request.target_order_id = ?)
+         AND (owner_request.request_type <> 'additional_test' OR owner_request.applied_at IS NOT NULL)
+       ORDER BY owner_request.submitted_at, f.file_id`,
+      [baseRequest.request_id, orderIdValue, orderIdValue]
+    );
+    const imageAppendResult = await appendRequestImagesToPdf(pdfPath, requestImageFiles.map((file) => ({
+      originalFilename: file.original_filename,
+      absolutePath: resolveUploadPath(file.stored_path)
+    })));
     const pdfStat = await fs.stat(pdfPath);
     if (!pdfStat.size) throw new Error('生成的 PDF 文件为空');
 
@@ -840,25 +992,19 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
        VALUES (?, 'application_pdf', ?, ?, 'application/pdf', ?, ?)`,
       [row.request_id, filename, storedPath, pdfStat.size, req.user.user_id]
     );
-    const [generatedPdfFiles] = await conn.query(
-      `SELECT DISTINCT f.stored_path
-       FROM order_request_files f
-       JOIN order_requests owner_request ON owner_request.request_id = f.request_id
-       WHERE f.file_type = 'application_pdf' AND f.file_id <> ?
-         AND COALESCE(owner_request.approved_order_id, owner_request.target_order_id) = ?`,
-      [fileResult.insertId, orderIdValue]
+    // 历史 PDF 文件继续保留在申请系统中；这里只移除它们在 LIMS 的附件关联。
+    // 使用 stored_path 后缀匹配，兼容历史环境中不同的上传根目录。
+    await conn.query(
+      `DELETE lims_file
+       FROM project_files lims_file
+       JOIN order_request_files generated_pdf
+         ON generated_pdf.file_type = 'application_pdf'
+        AND lims_file.filepath LIKE CONCAT('%/', generated_pdf.stored_path)
+       JOIN order_requests pdf_owner ON pdf_owner.request_id = generated_pdf.request_id
+       WHERE lims_file.order_id = ? AND lims_file.category = 'order_attachment'
+         AND COALESCE(pdf_owner.approved_order_id, pdf_owner.target_order_id) = ?`,
+      [orderIdValue, orderIdValue]
     );
-    const previousProjectPaths = generatedPdfFiles
-      .map((file) => resolveUploadPath(file.stored_path).replace(/\\/g, '/'))
-      .filter(Boolean);
-    if (previousProjectPaths.length) {
-      await conn.query(
-        `DELETE FROM project_files
-         WHERE order_id = ? AND category = 'order_attachment'
-           AND filepath IN (${previousProjectPaths.map(() => '?').join(',')})`,
-        [orderIdValue, ...previousProjectPaths]
-      );
-    }
     for (const testItem of testItems) {
       await conn.query(
         `INSERT INTO project_files
@@ -867,13 +1013,43 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
         [filename, projectFilepath, orderIdValue, testItem.test_item_id, req.user.user_id]
       );
     }
-    await conn.query(
-      `UPDATE order_requests
-       SET attachment_file_id = ?, sample_flow_token = ?, version = version + 1
-       WHERE request_id = ?`,
-      [fileResult.insertId, sampleFlowToken, row.request_id]
+    const [[limsPdfState]] = await conn.query(
+      `SELECT COUNT(DISTINCT lims_file.filepath) AS version_count,
+              COUNT(DISTINCT lims_file.test_item_id) AS linked_test_item_count
+       FROM project_files lims_file
+       JOIN order_request_files generated_pdf
+         ON generated_pdf.file_type = 'application_pdf'
+        AND lims_file.filepath LIKE CONCAT('%/', generated_pdf.stored_path)
+       JOIN order_requests pdf_owner ON pdf_owner.request_id = generated_pdf.request_id
+       WHERE lims_file.order_id = ? AND lims_file.category = 'order_attachment'
+         AND COALESCE(pdf_owner.approved_order_id, pdf_owner.target_order_id) = ?`,
+      [orderIdValue, orderIdValue]
     );
-    if (baseRequest.request_id !== row.request_id && !baseRequest.sample_flow_token) {
+    if (Number(limsPdfState?.version_count) !== 1
+        || Number(limsPdfState?.linked_test_item_count) !== testItems.length) {
+      throw new Error('LIMS 最新 PDF 附件关联校验失败');
+    }
+    const tokenPersistence = sampleFlowTokenPersistencePlan(
+      baseRequest.request_id,
+      row.request_id,
+      baseRequest.sample_flow_token
+    );
+    if (tokenPersistence.writeCurrentToken) {
+      await conn.query(
+        `UPDATE order_requests
+         SET attachment_file_id = ?, sample_flow_token = ?, version = version + 1
+         WHERE request_id = ?`,
+        [fileResult.insertId, sampleFlowToken, row.request_id]
+      );
+    } else {
+      await conn.query(
+        `UPDATE order_requests
+         SET attachment_file_id = ?, version = version + 1
+         WHERE request_id = ?`,
+        [fileResult.insertId, row.request_id]
+      );
+    }
+    if (tokenPersistence.writeBaseToken) {
       await conn.query(
         `UPDATE order_requests SET sample_flow_token = ? WHERE request_id = ?`,
         [sampleFlowToken, baseRequest.request_id]
@@ -888,7 +1064,8 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       filename,
       linked_test_item_count: testItems.length,
       conversion_engine: conversion.engine,
-      qr_page_count: qrResult.pageCount
+      qr_page_count: qrResult.pageCount + imageAppendResult.appendedPageCount,
+      appended_image_page_count: imageAppendResult.appendedPageCount
     });
   } catch (error) {
     await conn.rollback().catch(() => {});
@@ -902,10 +1079,58 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
   }
 });
 
+router.get('/:id/flow-document', async (req, res, next) => {
+  try {
+    const [[row]] = await pool.query(
+      `SELECT r.request_id, r.applicant_user_id, r.approved_order_id, r.target_order_id,
+              r.reviewed_payload, r.submitted_payload
+       FROM order_requests r WHERE r.request_id = ?`,
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ message: '申请不存在' });
+    if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权下载该申请的流转单' });
+    const orderId = String(row.approved_order_id || row.target_order_id || '').trim();
+    if (!orderId) return res.status(409).json({ message: '完成开单后才能下载流转单' });
+    const [[orderExists]] = await pool.query('SELECT order_id FROM orders WHERE order_id = ? LIMIT 1', [orderId]);
+    if (!orderExists) return res.status(409).json({ message: '完成开单后才能下载流转单' });
+
+    const [[baseRequest]] = await pool.query(
+      `SELECT reviewed_payload, submitted_payload
+       FROM order_requests
+       WHERE request_type = 'normal' AND approved_order_id = ? AND status = 'approved'
+       ORDER BY request_id LIMIT 1`,
+      [orderId]
+    );
+    const [[latestModification]] = await pool.query(
+      `SELECT reviewed_payload, submitted_payload
+       FROM order_requests
+       WHERE request_type = 'modification' AND target_order_id = ? AND status = 'approved'
+       ORDER BY reviewed_at DESC, request_id DESC LIMIT 1`,
+      [orderId]
+    );
+    const packet = parseJson(latestModification?.reviewed_payload)
+      || parseJson(latestModification?.submitted_payload)
+      || parseJson(baseRequest?.reviewed_payload)
+      || parseJson(baseRequest?.submitted_payload)
+      || parseJson(row.reviewed_payload)
+      || parseJson(row.submitted_payload)
+      || {};
+    const items = await getOrderTestItemsForFlow(pool, orderId);
+    const flowData = buildProcessTemplateData(packet, orderId, items);
+    const buffer = await generateProcessTemplateBuffer(flowData);
+    const customerName = safeFilePart(flowData.customer_name, '委托方');
+    const contactName = safeFilePart(flowData.customer_contactName, '联系人');
+    const filename = `${safeFilePart(orderId, '委托单')}-${customerName}-${contactName}-流转单.docx`;
+    res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(buffer);
+  } catch (error) { next(error); }
+});
+
 router.get('/:id/attachment', async (req, res, next) => {
   try {
     const [[row]] = await pool.query(
-      `SELECT r.applicant_user_id, r.attachment_file_id,
+      `SELECT r.request_id, r.applicant_user_id, r.attachment_file_id,
               f.original_filename, f.stored_path, f.mime_type
        FROM order_requests r
        LEFT JOIN order_request_files f ON f.file_id = r.attachment_file_id
@@ -913,7 +1138,7 @@ router.get('/:id/attachment', async (req, res, next) => {
       [req.params.id]
     );
     if (!row) return res.status(404).json({ message: '申请不存在' });
-    if (!isReviewer(req.user) && row.applicant_user_id !== req.user.user_id) {
+    if (!await canAccessRequest(row, req.user)) {
       return res.status(403).json({ message: '无权下载该申请附件' });
     }
     if (!row.attachment_file_id || !row.stored_path) return res.status(404).json({ message: '该申请没有 PDF 附件' });
@@ -951,9 +1176,22 @@ router.get('/:id', async (req, res, next) => {
       [req.params.id]
     );
     if (!row) return res.status(404).json({ message: '申请不存在' });
-    if (!isReviewer(req.user) && row.applicant_user_id !== req.user.user_id) {
+    if (!await canAccessRequest(row, req.user)) {
       return res.status(403).json({ message: '无权查看该申请' });
     }
+    const relatedOrderId = row.approved_order_id || row.target_order_id || extractReservedOrderId(row.reviewed_payload);
+    const [relatedRows] = await pool.query(
+      `SELECT request_id
+       FROM order_requests
+       WHERE request_id <> ?
+         AND (
+           root_request_id = COALESCE(?, ?)
+           OR (? IS NOT NULL AND (approved_order_id = ? OR target_order_id = ?))
+         )
+       ORDER BY submitted_at, request_id`,
+      [row.request_id, row.root_request_id, row.request_id, relatedOrderId || null, relatedOrderId || null, relatedOrderId || null]
+    );
+    row.related_request_ids = relatedRows.map((item) => item.request_id);
     row.submitted_payload = parseJson(row.submitted_payload);
     row.reviewed_payload = parseJson(row.reviewed_payload);
     row.reserved_order_id = extractReservedOrderId(row.reviewed_payload) || null;
@@ -963,6 +1201,7 @@ router.get('/:id', async (req, res, next) => {
       : row.request_type === 'modification'
         ? row.status === 'approved'
         : Boolean(row.applied_at);
+    row.display_status = row.status === 'approved' ? (row.order_opened ? 'opened' : 'pending_open') : row.status;
     row.request_no = requestNumber(row.request_id);
     res.json(row);
   } catch (error) { next(error); }
@@ -1196,6 +1435,7 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
           connection: conn,
           operatorUserId: req.user.user_id
         });
+    const flowTestItems = await getOrderTestItemsForFlow(conn, result.orderNum);
     await linkRequestFilesToLims(conn, row.request_id, result.orderNum);
     if (row.request_type === 'additional_test') {
       await conn.query(
@@ -1210,7 +1450,7 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
     }
     await addEvent(conn, row.request_id, req.user.user_id, 'opened', result.orderNum);
     await conn.commit();
-    res.json({ ok: true, status: 'approved', orderNum: result.orderNum, version: expectedVersion + 1 });
+    res.json({ ok: true, status: 'approved', orderNum: result.orderNum, flowTestItems, version: expectedVersion + 1 });
   } catch (error) {
     await conn.rollback().catch(() => {});
     if (error.status) return res.status(error.status).json({ message: error.message });

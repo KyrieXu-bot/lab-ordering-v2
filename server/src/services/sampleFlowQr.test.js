@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { calculateQrPlacement } = require('./sampleFlowQr');
+const { calculateQrPlacement, sampleFlowTokenPersistencePlan } = require('./sampleFlowQr');
 
 const MM_TO_POINTS = 72 / 25.4;
 
@@ -23,4 +23,19 @@ test('二维码在纵向和横向 A4 页面均位于页眉任务编号左侧', (
   assert.ok(Math.abs(portrait.x - (210 - 56 - 15) * MM_TO_POINTS) < 0.001);
   assert.ok(Math.abs(landscapeFirst.x - (297 - 71 - 15) * MM_TO_POINTS) < 0.001);
   assert.ok(Math.abs(landscapeContinuation.x - (297 - 86 - 15) * MM_TO_POINTS) < 0.001);
+});
+
+test('加测或修改 PDF 复用原申请二维码但不向后续申请重复写入唯一 token', () => {
+  assert.deepEqual(sampleFlowTokenPersistencePlan(22, 22, null), {
+    writeCurrentToken: true,
+    writeBaseToken: false
+  });
+  assert.deepEqual(sampleFlowTokenPersistencePlan(22, 27, 'SF_existing'), {
+    writeCurrentToken: false,
+    writeBaseToken: false
+  });
+  assert.deepEqual(sampleFlowTokenPersistencePlan(22, 27, null), {
+    writeCurrentToken: false,
+    writeBaseToken: true
+  });
 });

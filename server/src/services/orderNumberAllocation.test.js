@@ -1,6 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { allocateOrderId, buildApprovedPayload, targetOrderPrefix } = require('./orderNumberAllocation');
+const {
+  allocateOrderId,
+  buildApprovedPayload,
+  monthPrefixForChoice,
+  nextReviewerCreatedOrderId,
+  targetOrderPrefix
+} = require('./orderNumberAllocation');
 
 function request(requestId, submittedAt, choice = 'current', extra = {}) {
   return {
@@ -63,6 +69,29 @@ test('十二月选择次月会正确跨年', () => {
 test('历史三位序号也参与月度最大号计算，新号码仍输出四位', () => {
   const row = request(10, '2025-04-20T08:00:00');
   assert.equal(allocateOrderId({ prefix: 'JC2504', targetRequestId: 10, orderIds: ['JC2504099'], requestRows: [row] }), 'JC25040100');
+});
+
+test('开单员自行创建时忽略未审批申请，只按正式单号继续编号', () => {
+  assert.equal(nextReviewerCreatedOrderId({
+    prefix: 'JC2608',
+    formalOrderIds: ['JC26080001', 'JC26080005'],
+    approvedReservedOrderIds: []
+  }), 'JC26080006');
+});
+
+test('开单员自行创建时已审批预留号参与最大号计算', () => {
+  assert.equal(nextReviewerCreatedOrderId({
+    prefix: 'JC2608',
+    formalOrderIds: ['JC26080005'],
+    approvedReservedOrderIds: ['JC26080006', 'JC26080008']
+  }), 'JC26080009');
+});
+
+test('开单员可按上月、当月、次月选择编号月份并正确跨年', () => {
+  const now = new Date(2026, 0, 15, 10, 0, 0);
+  assert.equal(monthPrefixForChoice(now, 'previous'), 'JC2512');
+  assert.equal(monthPrefixForChoice(now, 'current'), 'JC2601');
+  assert.equal(monthPrefixForChoice(now, 'next'), 'JC2602');
 });
 
 test('审批只预留单号并保留业务快照，正式检测项目保持空白', () => {

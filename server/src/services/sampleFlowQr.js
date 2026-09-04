@@ -28,6 +28,14 @@ function calculateQrPlacement(pageWidth, pageHeight, options = {}) {
   };
 }
 
+function sampleFlowTokenPersistencePlan(baseRequestId, currentRequestId, baseToken) {
+  const isBaseRequest = String(baseRequestId) === String(currentRequestId);
+  return {
+    writeCurrentToken: isBaseRequest,
+    writeBaseToken: !isBaseRequest && !String(baseToken || '').trim()
+  };
+}
+
 async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   const scanUrl = buildSampleFlowScanUrl(flowToken);
   const qrBuffer = await QRCode.toBuffer(scanUrl, {
@@ -62,4 +70,4 @@ async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   return { scanUrl, pageCount: pdf.getPageCount() };
 }
 
-module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl, calculateQrPlacement };
+module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl, calculateQrPlacement, sampleFlowTokenPersistencePlan };

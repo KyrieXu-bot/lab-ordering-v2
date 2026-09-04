@@ -1,9 +1,6 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs').promises;
-const PizZip = require('pizzip');
-const Docxtemplater = require('docxtemplater');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
+const { generateProcessTemplateBuffer } = require('../services/processTemplate');
 
 const router = express.Router();
 
@@ -40,55 +37,7 @@ router.post('/generate-process-template', async (req, res) => {
     const flowData = req.body;
     console.log('收到流转单模板数据，字段数量:', Object.keys(flowData).length);
     
-    // 模板文件路径
-    const templatePath = path.join(__dirname, '..', '..', 'templates', 'process_template.docx');
-    console.log('流转单模板文件路径:', templatePath);
-    
-    // 检查模板文件是否存在
-    try {
-      await fs.access(templatePath);
-      console.log('流转单模板文件存在');
-    } catch (error) {
-      console.error('流转单模板文件不存在:', error);
-      return res.status(404).json({ error: '流转单模板文件不存在' });
-    }
-
-    // 读取模板文件
-    console.log('开始读取流转单模板文件...');
-    const templateBuffer = await fs.readFile(templatePath);
-    console.log('流转单模板文件大小:', templateBuffer.length);
-    
-    if (templateBuffer.length === 0) {
-      throw new Error('流转单模板文件为空');
-    }
-    
-    // 生成文档
-    console.log('开始创建流转单PizZip...');
-    const zip = new PizZip(templateBuffer);
-    console.log('流转单PizZip创建成功');
-    
-    console.log('开始创建流转单Docxtemplater...');
-    const doc = new Docxtemplater(zip);
-    console.log('流转单Docxtemplater创建成功');
-    
-    // 设置数据
-    console.log('开始设置流转单数据...');
-    doc.setData(flowData);
-    console.log('流转单数据设置成功');
-    
-    // 渲染文档
-    console.log('开始渲染流转单文档...');
-    try {
-      doc.render();
-      console.log('流转单文档渲染成功');
-    } catch (renderError) {
-      console.error('流转单文档渲染失败:', renderError);
-      throw new Error(`流转单文档渲染失败: ${renderError.message}`);
-    }
-    
-    // 生成最终文档
-    console.log('开始生成最终流转单文档...');
-    const report = doc.getZip().generate({ type: 'nodebuffer' });
+    const report = await generateProcessTemplateBuffer(flowData);
     console.log('流转单文档生成成功，大小:', report.length);
 
     // 设置响应头（命名：委托单号+客户名称+委托联系人名称）

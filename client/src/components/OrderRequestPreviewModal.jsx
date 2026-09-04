@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getCommissionerSignature, getOrderRequest, getSalespersonSignature } from '../api/api'
+import { downloadOrderRequestFile, getCommission, getCommissionerSignature, getOrderRequest, getOrderRequestFiles, getSalespersonSignature } from '../api/api'
 import '../css/OrderRequestPreview.css'
 
 const mark = (value) => value ? '☑' : '☐'
@@ -11,14 +11,19 @@ function signatureToUrl(response) {
   return URL.createObjectURL(response.data instanceof Blob ? response.data : new Blob([response.data], { type: 'image/png' }))
 }
 
-export default function OrderRequestPreviewModal({ open, onClose, requestId, packet: livePacket, requestMeta, commissionerSignatureUrl: liveCommissionerSignature, salesSignatureUrl: liveSalesSignature }) {
+export default function OrderRequestPreviewModal({ open, onClose, requestId, relatedRequestIds = [], packet: livePacket, requestMeta, commissionerSignatureUrl: liveCommissionerSignature, salesSignatureUrl: liveSalesSignature, imageAttachments = null }) {
   const [packet, setPacket] = useState(livePacket || null)
   const [comparisonPacket, setComparisonPacket] = useState(null)
+  const [aggregatedAdditionalPackets, setAggregatedAdditionalPackets] = useState([])
+  const [officialOrderItems, setOfficialOrderItems] = useState([])
   const [meta, setMeta] = useState(requestMeta || null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [commissionerSignatureUrl, setCommissionerSignatureUrl] = useState(liveCommissionerSignature || '')
   const [salesSignatureUrl, setSalesSignatureUrl] = useState(liveSalesSignature || '')
+  const [previewImages, setPreviewImages] = useState([])
+  const [resolvedRelatedRequestIds, setResolvedRelatedRequestIds] = useState([])
+  const relatedRequestIdsKey = relatedRequestIds.map(String).sort().join(',')
 
   useEffect(() => {
     if (!open) return undefined
@@ -32,6 +37,9 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
     setError('')
     setPacket(livePacket || null)
     setComparisonPacket(null)
+    setAggregatedAdditionalPackets([])
+    setOfficialOrderItems([])
+    setResolvedRelatedRequestIds([])
     setMeta(requestMeta || null)
     if (!requestId) return
     let active = true
@@ -39,11 +47,98 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
     getOrderRequest(requestId)
       .then(async ({ data }) => {
         if (!active) return
-        setMeta(data)
-        setPacket(data.reviewed_payload || data.submitted_payload || {})
-        if (['modification', 'additional_test'].includes(data.request_type) && data.parent_request_id) {
+        const loadOfficialOrderItems = async (orderId) => {
+          if (!orderId) return []
           try {
-            const { data: parent } = await getOrderRequest(data.parent_request_id)
+            const response = await getCommission(orderId)
+            return normalizeItems(response.data?.testItems || [])
+          } catch (_) {
+            return []
+          }
+        }
+        const loadRelatedRequests = async (primary) => {
+          const stableRelatedRequestIds = relatedRequestIdsKey ? relatedRequestIdsKey.split(',') : []
+          const serverRelatedRequestIds = asArray(primary.related_request_ids)
+          const uniqueRelatedIds = Array.from(new Set([primary.request_id, ...stableRelatedRequestIds, ...serverRelatedRequestIds].filter(Boolean).map(String)))
+          const requests = await Promise.all(uniqueRelatedIds.map(async (id) => {
+            if (String(id) === String(primary.request_id)) return primary
+            try {
+              const response = await getOrderRequest(id)
+              return response.data
+            } catch (_) {
+              return null
+            }
+          }))
+          return requests.filter(Boolean)
+        }
+        const liveRequestType = requestMeta?.request_type || requestMeta?.requestType
+        if (livePacket) {
+          if (liveRequestType === 'additional_test') {
+            const relatedRequests = await loadRelatedRequests(data)
+            if (!active) return
+            setResolvedRelatedRequestIds(relatedRequests.map((item) => item.request_id))
+            const baseRequest = [...relatedRequests]
+              .filter((item) => item.request_type !== 'additional_test' && item.status !== 'withdrawn')
+              .sort((a, b) => Number(b.request_id) - Number(a.request_id))[0] || data
+            setMeta({ ...baseRequest, ...(requestMeta || {}), request_type: 'additional_test' })
+            setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
+            setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
+            setAggregatedAdditionalPackets([
+              ...relatedRequests
+                .filter((item) => item.request_type === 'additional_test' && item.status !== 'withdrawn' && String(item.request_id) !== String(data.request_id))
+                .sort((a, b) => Number(a.request_id) - Number(b.request_id))
+                .map((item) => ({ packet: item.reviewed_payload || item.submitted_payload || {}, submittedAt: item.submitted_at, appliedAt: item.applied_at })),
+              { packet: livePacket, submittedAt: new Date().toISOString(), appliedAt: null }
+            ])
+            return
+          }
+          setMeta({ ...data, ...(requestMeta || {}), request_type: liveRequestType || data.request_type })
+          setPacket(livePacket)
+          setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
+          if (['modification', 'additional_test'].includes(liveRequestType)) {
+            if (data.request_type === liveRequestType && data.parent_request_id) {
+              try {
+                const parent = (await getOrderRequest(data.parent_request_id)).data
+                if (active) setComparisonPacket(parent.reviewed_payload || parent.submitted_payload || null)
+              } catch (_) {
+                if (active) setComparisonPacket(null)
+              }
+            } else {
+              setComparisonPacket(data.reviewed_payload || data.submitted_payload || null)
+            }
+          }
+          return
+        }
+
+        let relatedRequests = await loadRelatedRequests(data)
+        if (!active) return
+        const selectedAt = new Date(data.submitted_at || 0).getTime()
+        relatedRequests = relatedRequests.filter((item) => {
+          if (String(item.request_id) === String(data.request_id)) return true
+          const submittedAt = new Date(item.submitted_at || 0).getTime()
+          return !selectedAt || !submittedAt || submittedAt <= selectedAt
+        })
+        setResolvedRelatedRequestIds(relatedRequests.map((item) => item.request_id))
+        const baseRequest = [...relatedRequests]
+          .filter((item) => item.status !== 'withdrawn')
+          .sort((a, b) => Number(b.request_id) - Number(a.request_id))
+          .find((item) => item.request_type !== 'additional_test') || data
+        setMeta({ ...baseRequest, ...data, request_type: data.request_type })
+        setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
+        setOfficialOrderItems(await loadOfficialOrderItems(baseRequest.display_order_id || baseRequest.approved_order_id || baseRequest.target_order_id || data.display_order_id))
+        setAggregatedAdditionalPackets(relatedRequests
+          .filter((item) => item.request_type === 'additional_test' && item.status !== 'withdrawn')
+          .sort((a, b) => Number(a.request_id) - Number(b.request_id))
+          .map((item) => ({
+            packet: item.reviewed_payload || item.submitted_payload || {},
+            submittedAt: item.submitted_at,
+            appliedAt: item.applied_at
+          })))
+
+        if (baseRequest.request_type === 'modification' && baseRequest.parent_request_id) {
+          try {
+            const cachedParent = relatedRequests.find((item) => String(item.request_id) === String(baseRequest.parent_request_id))
+            const parent = cachedParent || (await getOrderRequest(baseRequest.parent_request_id)).data
             if (active) setComparisonPacket(parent.reviewed_payload || parent.submitted_payload || null)
           } catch (_) {
             if (active) setComparisonPacket(null)
@@ -53,19 +148,43 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
       .catch((requestError) => active && setError(requestError.response?.data?.message || '预览加载失败'))
       .finally(() => active && setLoading(false))
     return () => { active = false }
-  }, [open, requestId, livePacket, requestMeta])
+  }, [open, requestId, relatedRequestIdsKey, livePacket, requestMeta])
 
   const view = useMemo(() => normalizePacket(packet, meta), [packet, meta])
   const previousView = useMemo(() => comparisonPacket ? normalizePacket(comparisonPacket, {}) : null, [comparisonPacket])
-  const compareChanges = meta?.request_type === 'modification' && Boolean(previousView)
-  const highlightAddedItems = meta?.request_type === 'additional_test'
+  const requestType = meta?.request_type || meta?.requestType
+  const compareChanges = requestType === 'modification' && Boolean(previousView)
+  const highlightAddedItems = requestType === 'additional_test'
+  const aggregatedAdditionalItems = useMemo(() => aggregatedAdditionalPackets.flatMap((entry) =>
+    normalizePacket(entry.packet, {}).items.map((item) => ({ ...item, traceTime: entry.submittedAt, traceApplied: Boolean(entry.appliedAt) }))
+  ), [aggregatedAdditionalPackets])
   const previewItems = useMemo(() => {
+    if (aggregatedAdditionalItems.length) {
+      const tracesByFingerprint = new Map()
+      aggregatedAdditionalItems.forEach((item) => {
+        const fingerprint = itemFingerprint(item)
+        if (!tracesByFingerprint.has(fingerprint)) tracesByFingerprint.set(fingerprint, [])
+        tracesByFingerprint.get(fingerprint).push(item)
+      })
+      const baseItems = view.items.map((item) => {
+        const matchingTraces = tracesByFingerprint.get(itemFingerprint(item)) || []
+        const trace = matchingTraces.shift()
+        return trace ? { ...item, previewAdded: true, traceTime: trace.traceTime } : { ...item, previewAdded: false }
+      })
+      const remainingAdditionalItems = Array.from(tracesByFingerprint.values()).flat()
+      return [
+        ...baseItems,
+        ...remainingAdditionalItems.map(item => ({ ...item, previewAdded: true }))
+      ]
+    }
+    if (!view.items.length && officialOrderItems.length) return officialOrderItems.map((item) => ({ ...item, previewAdded: item.isAddOn }))
     if (!highlightAddedItems || !previousView) return view.items.map(item => ({ ...item, previewAdded: false }))
     return [
       ...previousView.items.map(item => ({ ...item, previewAdded: false })),
       ...view.items.map(item => ({ ...item, previewAdded: true }))
     ]
-  }, [highlightAddedItems, previousView, view.items])
+  }, [aggregatedAdditionalItems, highlightAddedItems, officialOrderItems, previousView, view.items])
+  const modificationTraceNote = compareChanges ? `修改 · ${formatTraceTime(meta?.submitted_at || meta?.submittedAt)}` : ''
 
   useEffect(() => {
     if (!open) return undefined
@@ -88,6 +207,47 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
     return () => { active = false; objectUrls.forEach((url) => URL.revokeObjectURL(url)) }
   }, [open, view.customerId, view.salesUserId, liveCommissionerSignature, liveSalesSignature])
 
+  useEffect(() => {
+    if (!open) return undefined
+    let active = true
+    const objectUrls = []
+    setPreviewImages([])
+    const loadImages = async () => {
+      let entries = Array.isArray(imageAttachments) ? imageAttachments : []
+      if (!entries.length && requestId) {
+        const ownerRequestIds = resolvedRelatedRequestIds.length ? resolvedRelatedRequestIds : [requestId]
+        const requestFileGroups = await Promise.all(ownerRequestIds.map(async (ownerRequestId) => {
+          try {
+            const { data } = await getOrderRequestFiles(ownerRequestId)
+            return (Array.isArray(data) ? data : [])
+              .filter((item) => item.file_type === 'request_image')
+              .map((item) => ({ ...item, ownerRequestId }))
+          } catch (_) {
+            return []
+          }
+        }))
+        entries = requestFileGroups.flat()
+      }
+      const loaded = []
+      for (const entry of entries) {
+        if (typeof File !== 'undefined' && entry.file instanceof File) {
+          const url = URL.createObjectURL(entry.file)
+          objectUrls.push(url)
+          loaded.push({ name: entry.file.name, url })
+        } else if (requestId && entry.file_id) {
+          const response = await downloadOrderRequestFile(entry.ownerRequestId || requestId, entry.file_id)
+          const blob = response.data instanceof Blob ? response.data : new Blob([response.data], { type: entry.mime_type || 'image/jpeg' })
+          const url = URL.createObjectURL(blob)
+          objectUrls.push(url)
+          loaded.push({ name: entry.original_filename || '附件图片', url })
+        }
+      }
+      if (active) setPreviewImages(loaded)
+    }
+    loadImages().catch(() => active && setPreviewImages([]))
+    return () => { active = false; objectUrls.forEach((url) => URL.revokeObjectURL(url)) }
+  }, [open, requestId, imageAttachments, resolvedRelatedRequestIds])
+
   if (!open) return null
   return (
     <div className="order-preview-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -98,15 +258,8 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
         </header>
         <div className="order-preview-scroll">
           {loading ? <div className="order-preview-state">正在生成预览…</div> : error ? <div className="order-preview-state is-error">{error}</div> : (
-            <article className="order-preview-paper">
-              <div className="snapshot-document-header">
-                <div className="snapshot-company-brand">
-                  <img src="/JITRI-logo3.png" alt="集萃新材料研发有限公司" />
-                  <div><strong>集萃新材料研发有限公司</strong><small>JITRI Advanced Materials R&amp;D Co.,Ltd.</small></div>
-                </div>
-                <h1>检测委托单 <small>Testing Application Form</small></h1>
-                <div className="snapshot-task-number"><span>任务编号</span><small>Task number：</small><strong>{view.orderNum}</strong></div>
-              </div>
+            <><article className={`order-preview-paper${compareChanges ? ' has-modification-traces' : ''}`} style={compareChanges ? { '--snapshot-modification-note': `"${modificationTraceNote}"` } : undefined}>
+              <SnapshotHeader orderNum={view.orderNum} />
               <table className="snapshot-table provider-table"><tbody>
                 <tr><th rowSpan="2">服务方名称<br/><small>Receiver Name</small></th><td rowSpan="2">集萃新材料研发有限公司</td><th>联系人 <small>Contact</small></th><td><ChangedText value={view.salesName} previous={previousView?.salesName} compare={compareChanges}/></td></tr>
                 <tr><th>邮 箱 <small>E-mail</small></th><td><ChangedText value={view.salesEmail} previous={previousView?.salesEmail} compare={compareChanges}/></td></tr>
@@ -144,11 +297,11 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
                 <table className="snapshot-table"><tbody>
                   <tr><th>★报告文档<br/><small>Report Content</small></th><td className="snapshot-options">
                     报告版式：<Choice checked={view.reportTypes.includes(1)} previousChecked={previousView?.reportTypes.includes(1)} compare={compareChanges}>测试图片或数据汇总（无需测试报告） Test pictures or data summaries (No test report)</Choice><br/>
-                    <Choice checked={view.reportTypes.includes(2)} previousChecked={previousView?.reportTypes.includes(2)} compare={compareChanges}>中文报告 Chinese report</Choice>　<Choice checked={view.reportTypes.includes(3)} previousChecked={previousView?.reportTypes.includes(3)} compare={compareChanges}>英文报告 English report</Choice>　<Choice checked={view.reportTypes.includes(6)} previousChecked={previousView?.reportTypes.includes(6)} compare={compareChanges}>中英文对照报告 Chinese-English bilingual report</Choice><br/>
+                    {!view.reportTypes.includes(1) && <><Choice checked={view.reportTypes.includes(2)} previousChecked={previousView?.reportTypes.includes(2)} compare={compareChanges}>中文报告 Chinese report</Choice>　<Choice checked={view.reportTypes.includes(3)} previousChecked={previousView?.reportTypes.includes(3)} compare={compareChanges}>英文报告 English report</Choice>　<Choice checked={view.reportTypes.includes(6)} previousChecked={previousView?.reportTypes.includes(6)} compare={compareChanges}>中英文对照报告 Chinese-English bilingual report</Choice><br/>
                     报告标识章：<Choice checked={view.seals.includes('normal')} previousChecked={previousView?.seals.includes('normal')} compare={compareChanges}>普通报告 Normal report</Choice>　<Choice checked={view.seals.includes('cnas')} previousChecked={previousView?.seals.includes('cnas')} compare={compareChanges}>CNAS</Choice>　<Choice checked={view.seals.includes('cma')} previousChecked={previousView?.seals.includes('cma')} compare={compareChanges}>CMA</Choice>
                     <span className="snapshot-report-rule" />
                     交付形式：<Choice checked={view.reportTypes.includes(4)} previousChecked={previousView?.reportTypes.includes(4)} compare={compareChanges}>仅电子版报告 E-report only</Choice>　<Choice checked={view.reportTypes.includes(5)} previousChecked={previousView?.reportTypes.includes(5)} compare={compareChanges}>电子版+纸质版报告 Electronic + Printed report</Choice><br/>
-                    纸质版报告寄送地址：<Choice checked={oneOf(view.paperShipping, 1)} previousChecked={oneOf(previousView?.paperShipping, 1)} compare={compareChanges}>邮寄到委托方</Choice>　<Choice checked={oneOf(view.paperShipping, 2)} previousChecked={oneOf(previousView?.paperShipping, 2)} compare={compareChanges}>邮寄到付款方</Choice>　<Choice checked={oneOf(view.paperShipping, 3)} previousChecked={oneOf(previousView?.paperShipping, 3)} compare={compareChanges}>其他</Choice> <InlineBlank value={view.reportAdditionalInfo} previous={previousView?.reportAdditionalInfo} compare={compareChanges} />
+                    纸质版报告寄送地址：<Choice checked={oneOf(view.paperShipping, 1)} previousChecked={oneOf(previousView?.paperShipping, 1)} compare={compareChanges}>邮寄到委托方</Choice>　<Choice checked={oneOf(view.paperShipping, 2)} previousChecked={oneOf(previousView?.paperShipping, 2)} compare={compareChanges}>邮寄到付款方</Choice>　<Choice checked={oneOf(view.paperShipping, 3)} previousChecked={oneOf(previousView?.paperShipping, 3)} compare={compareChanges}>其他</Choice> <InlineBlank value={view.reportAdditionalInfo} previous={previousView?.reportAdditionalInfo} compare={compareChanges} /></>}
                   </td></tr>
                   <tr><th>★报告抬头<br/><small>Report Information</small></th><td><Choice checked={oneOf(view.reportHeader, 1)} previousChecked={oneOf(previousView?.reportHeader, 1)} compare={compareChanges}>同委托方名称和地址 Same as applicant</Choice>　<Choice checked={oneOf(view.reportHeader, 2)} previousChecked={oneOf(previousView?.reportHeader, 2)} compare={compareChanges}>其他</Choice> <InlineBlank value={view.reportHeaderOther} previous={previousView?.reportHeaderOther} compare={compareChanges} /></td></tr>
                   <tr><th>★报告版式<br/><small>Report Form</small></th><td><Choice checked={oneOf(view.reportForm, 1)} previousChecked={oneOf(previousView?.reportForm, 1)} compare={compareChanges}>一份委托单对应一个报告</Choice>　<Choice checked={oneOf(view.reportForm, 2)} previousChecked={oneOf(previousView?.reportForm, 2)} compare={compareChanges}>每一个项目对应一份报告</Choice></td></tr>
@@ -158,7 +311,7 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
               <Section title="检测要求附录" english="Testing Requirements Appendix">
                 <div className="snapshot-table-overflow"><table className="snapshot-table appendix-table"><thead><tr>
                   <th>序号<br/><small>No.</small></th><th>★样品名称<br/><small>Sample Name</small></th><th>★材质<br/><small>Material</small></th><th>★样品型态<br/><small>Sample State</small></th><th>样品原号<br/><small>Sample No.</small></th><th>★检测项目<br/><small>Test Items</small></th><th>★检测标准<br/><small>Methods</small></th><th>★数量<br/><small>Qty</small></th><th>备注<br/><small>Remarks</small></th>
-                </tr></thead><tbody>{previewItems.length ? previewItems.map((item, index) => <tr className={item.previewAdded ? 'snapshot-added-item' : ''} key={index}><td>{index + 1}</td><td>{item.sampleName}</td><td>{item.material}</td><td>{item.sampleType}</td><td>{item.originalNo}</td><td>{item.testItem}</td><td>{item.method}</td><td>{item.quantity}</td><td>{item.note}</td></tr>) : <tr><td>1</td><td/><td/><td/><td/><td/><td/><td/><td/></tr>}</tbody></table></div>
+                </tr></thead><tbody>{previewItems.length ? previewItems.map((item, index) => <tr className={item.previewAdded ? 'snapshot-added-item' : ''} key={index}><td>{index + 1}</td><td>{item.sampleName}</td><td>{item.material}</td><td>{item.sampleType}</td><td>{item.originalNo}</td><td>{item.testItem}</td><td>{item.method}</td><td>{item.quantity}</td><td>{item.note}{item.previewAdded && <span className="snapshot-trace-annotation">加测 · {formatTraceTime(item.traceTime || meta?.submitted_at || meta?.submittedAt)}</span>}</td></tr>) : <tr><td>1</td><td/><td/><td/><td/><td/><td/><td/><td/></tr>}</tbody></table></div>
                 <table className="snapshot-table"><tbody><tr><th>其他要求 <small>Other Requirements</small>：</th><td><ChangedText value={view.otherRequirements} previous={previousView?.otherRequirements} compare={compareChanges}/></td></tr></tbody></table>
                 <div className="snapshot-notes"><strong>注 Notes：</strong><ol><li>默认不出具评判结论。</li><li>未指明测试标准及年代号时，默认接受服务方推荐的方法及最新标准。</li><li><Choice checked={view.subcontractingNotAccepted} previousChecked={previousView?.subcontractingNotAccepted} compare={compareChanges}>不接受分包 Subcontracting is not accepted</Choice>；未勾选视为接受分包。</li><li>其他测试要求请在“其他要求”中写明。</li></ol></div>
               </Section>
@@ -175,6 +328,12 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
               </Section>
               <div className="snapshot-signatures"><Signature label="★委托方签名确认/日期" english="Authorized Signature/Date" image={commissionerSignatureUrl} date={view.customerSignatureDate}/><Signature label="★评审人确认/日期" english="Representative/Date" image={salesSignatureUrl} date={view.salesSignatureDate}/></div>
             </article>
+            {previewImages.map((image, index) => (
+              <article className="order-preview-paper snapshot-image-page" key={`${image.name}-${index}`}>
+                <SnapshotHeader orderNum={view.orderNum} />
+                <div className="snapshot-image-frame"><img src={image.url} alt={image.name} /></div>
+              </article>
+            ))}</>
           )}
         </div>
       </section>
@@ -183,6 +342,7 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, pac
 }
 
 function Section({ title, english, children }) { return <section className="snapshot-section"><h2>{title} <small>{english}</small></h2>{children}</section> }
+function SnapshotHeader({ orderNum }) { return <div className="snapshot-document-header"><div className="snapshot-company-brand"><img src="/JITRI-logo3.png" alt="集萃新材料研发有限公司"/><div><strong>集萃新材料研发有限公司</strong><small>JITRI Advanced Materials R&amp;D Co.,Ltd.</small></div></div><h1>检测委托单 <small>Testing Application Form</small></h1><div className="snapshot-task-number"><span>任务编号</span><small>Task number：</small><strong>{orderNum}</strong></div></div> }
 function ChangedText({ value, previous, compare }) {
   const changed = compare && text(value) !== text(previous)
   const displayValue = value === null || value === undefined || value === '' ? (changed ? '—' : '') : value
@@ -223,9 +383,30 @@ function normalizePacket(packet = {}, meta = {}) {
     payerName: payer.payer_name || form.payerInfo?.payerName || template.payer_name || '', payerAddress: payer.payer_address || form.payerInfo?.payerAddress || template.payer_address || '', payerPhone: payer.payer_contact_phone_num || form.payerInfo?.payerContactPhoneNum || template.payer_contactPhone || '', payerContact: payer.payer_contact_name || form.payerInfo?.payerContactName || template.payer_contactName || '', payerEmail: payer.payer_contact_email || form.payerInfo?.payerContactEmail || template.payer_contactEmail || '', payerBank: payer.bank_name || form.payerInfo?.bankName || template.payer_bankName || '', payerTaxNo: payer.tax_number || form.payerInfo?.taxNumber || template.payer_taxNumber || '', payerBankAccount: payer.bank_account || form.payerInfo?.bankAccount || template.payer_bankAccount || '',
     salesUserId: template.sales_user_id || snapshot.salesUserId || '', salesName: template.sales_name || snapshot.salesName || '', salesEmail: template.sales_email || snapshot.salesEmail || '', salesPhone: template.sales_phone || snapshot.salesPhone || '', salesSignatureDate: template.sales_signature_date || '', customerSignatureDate: template.customer_signature_date || '',
     urgency: form.orderUrgencyType || order.order_urgency_type || 'normal', deliveryDays: form.deliveryDays ?? order.delivery_days_after_receipt ?? '', reportTypes: asArray(form.reportType).length ? form.reportType : asArray(report.type), seals: asArray(form.reportSeals).length ? form.reportSeals : asArray(order.report_seals), paperShipping: form.paperReportShippingType || report.paper_report_shipping_type || '', reportAdditionalInfo: form.reportAdditionalInfo || report.report_additional_info || '', reportHeader: form.reportHeader || report.header_type || '', reportHeaderOther: form.reportHeaderAdditionalInfo || report.header_other || '', reportForm: form.reportForm || report.format_type || '',
-    items: sourceItems.map((item) => ({ sampleName: text(item.sampleName ?? item.sample_name), material: text(item.material), sampleType: sampleTypeText(item.sampleType ?? item.sample_type, item.sampleTypeCustom ?? item.sample_type_custom), originalNo: text(item.original_no ?? item.originalNo), testItem: text(item.test_item ?? item.testItem), method: text(item.test_method ?? item.testMethod), quantity: text(item.quantity), note: text(item.note ?? item.remarks) })),
+    items: normalizeItems(sourceItems),
     otherRequirements: form.otherRequirements || order.other_requirements || '', subcontractingNotAccepted: Boolean(form.subcontractingNotAccepted ?? order.subcontracting_not_accepted), hazards: asArray(requirements.hazards), hazardOther: requirements.hazardOther || requirements.hazard_other || '', magnetism: requirements.magnetism || '', conductivity: requirements.conductivity || '', breakable: requirements.breakable || '', brittle: requirements.brittle || '', handlingType: form.sampleSolutionType || handling.handling_type || '', returnAddressOption: form.sampleReturnInfo?.returnAddressOption || handling.return_info?.returnAddressOption || '', returnAddress: form.sampleReturnInfo?.returnAddress || handling.return_info?.returnAddress || ''
   }
 }
 
+function normalizeItems(sourceItems) {
+  return asArray(sourceItems).map((item) => ({
+    sampleName: text(item.sampleName ?? item.sample_name),
+    material: text(item.material),
+    sampleType: sampleTypeText(item.sampleType ?? item.sample_type, item.sampleTypeCustom ?? item.sample_type_custom),
+    originalNo: text(item.original_no ?? item.originalNo),
+    testItem: text(item.test_item ?? item.testItem),
+    method: text(item.test_method ?? item.testMethod),
+    quantity: text(item.quantity),
+    note: text(item.note ?? item.remarks),
+    isAddOn: item.is_add_on === true || Number(item.is_add_on ?? item.isAddOn) === 1
+  }))
+}
+
+function itemFingerprint(item = {}) {
+  return [item.sampleName, item.material, item.sampleType, item.originalNo, item.testItem, item.method, item.quantity]
+    .map((value) => text(value).trim().toLocaleLowerCase())
+    .join('\u001f')
+}
+
 function sampleTypeText(value, custom) { const labels = { 1:'板材', 2:'棒材', 3:'粉末', 4:'液体', 5:'其他' }; return custom || labels[value] || text(value) }
+function formatTraceTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '时间未知' }

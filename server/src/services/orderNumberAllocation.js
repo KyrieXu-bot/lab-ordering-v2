@@ -8,22 +8,36 @@ function extractReservedOrderId(payload) {
   return String(parsePayload(payload)?.workflow?.reservedOrderId || '').trim();
 }
 
+function monthPrefixForChoice(baseDate, choice = 'current') {
+  const date = baseDate instanceof Date ? new Date(baseDate) : new Date(String(baseDate || ''));
+  if (Number.isNaN(date.getTime())) throw new Error('日期无效，无法生成委托单号');
+  const monthOffset = choice === 'previous' ? -1 : choice === 'next' ? 1 : 0;
+  const targetDate = new Date(date.getFullYear(), date.getMonth() + monthOffset, 1);
+  return `JC${String(targetDate.getFullYear()).slice(-2)}${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
+}
+
 function targetOrderPrefix(submittedAt, payload) {
   const submittedDate = submittedAt instanceof Date ? new Date(submittedAt) : new Date(String(submittedAt || ''));
   if (Number.isNaN(submittedDate.getTime())) throw new Error('申请提交时间无效，无法生成委托单号');
   const parsedPayload = parsePayload(payload) || {};
   const choice = parsedPayload?.formSnapshot?.orderMonthPreference?.choice === 'next' ? 'next' : 'current';
-  const targetDate = new Date(
-    submittedDate.getFullYear(),
-    submittedDate.getMonth() + (choice === 'next' ? 1 : 0),
-    1
-  );
-  return `JC${String(targetDate.getFullYear()).slice(-2)}${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
+  return monthPrefixForChoice(submittedDate, choice);
 }
 
 function sequenceForOrderId(orderId, prefix) {
   const match = String(orderId || '').match(new RegExp(`^${prefix}(\\d{1,4})$`));
   return match ? Number(match[1]) : null;
+}
+
+function nextReviewerCreatedOrderId({ prefix, formalOrderIds = [], approvedReservedOrderIds = [] }) {
+  let monthlyMaximum = 0;
+  for (const orderId of [...formalOrderIds, ...approvedReservedOrderIds]) {
+    const sequence = sequenceForOrderId(orderId, prefix);
+    if (sequence != null) monthlyMaximum = Math.max(monthlyMaximum, sequence);
+  }
+  const nextSequence = monthlyMaximum + 1;
+  if (nextSequence > 9999) throw new Error(`${prefix} 月份委托单序号已超过四位数`);
+  return `${prefix}${String(nextSequence).padStart(4, '0')}`;
 }
 
 function allocateOrderId({ prefix, targetRequestId, orderIds, requestRows }) {
@@ -84,5 +98,7 @@ module.exports = {
   allocateOrderId,
   buildApprovedPayload,
   extractReservedOrderId,
-  targetOrderPrefix
+  targetOrderPrefix,
+  monthPrefixForChoice,
+  nextReviewerCreatedOrderId
 };

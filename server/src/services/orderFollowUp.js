@@ -52,6 +52,36 @@ async function applyOrderModification(conn, orderId, payload) {
        breakable = VALUES(breakable), brittle = VALUES(brittle)`,
     [orderId, JSON.stringify(requirements.hazards || []), clean(requirements.hazardOther), clean(requirements.magnetism), clean(requirements.conductivity), clean(requirements.breakable), clean(requirements.brittle)]
   );
+
+  const items = Array.isArray(commission.testItems) ? commission.testItems : [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const testItemId = Number(item.test_item_id);
+    if (!Number.isInteger(testItemId) || testItemId <= 0) {
+      throw Object.assign(new Error(`第${index + 1}行检测项目缺少正式项目标识，请刷新后重试`), { status: 409 });
+    }
+    const [[existingItem]] = await conn.query(
+      `SELECT test_item_id, category_name, detail_name
+       FROM test_items WHERE test_item_id = ? AND order_id = ? FOR UPDATE`,
+      [testItemId, orderId]
+    );
+    if (!existingItem) {
+      throw Object.assign(new Error(`第${index + 1}行检测项目不存在或不属于当前委托单`), { status: 409 });
+    }
+    // 检测项目名称（category_name/detail_name）不在修改申请中更新。
+    await conn.query(
+      `UPDATE test_items
+       SET sample_name = ?, material = ?, sample_type = ?, original_no = ?, standard_code = ?,
+           quantity = ?, note = ?, arrival_mode = ?, sample_arrival_status = ?
+       WHERE test_item_id = ? AND order_id = ?`,
+      [
+        clean(item.sample_name), clean(item.material), clean(item.sample_type), clean(item.original_no), clean(item.test_method),
+        Number(item.quantity) || 1, clean(item.note), item.arrival_mode === 'mail' ? 'delivery' : clean(item.arrival_mode),
+        ['arrived', 'not_arrived'].includes(item.sample_arrival_status) ? item.sample_arrival_status : 'not_arrived',
+        testItemId, orderId
+      ]
+    );
+  }
 }
 
 async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
@@ -61,7 +91,10 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
   const [[order]] = await conn.query('SELECT payer_id FROM orders WHERE order_id = ? FOR UPDATE', [orderId]);
   if (!order) throw Object.assign(new Error('关联的正式委托单不存在'), { status: 409 });
   const [[salesperson]] = order.payer_id ? await conn.query(
-    `SELECT u.account FROM payers p LEFT JOIN users u ON u.user_id = p.owner_user_id WHERE p.payer_id = ? LIMIT 1`,
+    `SELECT p.owner_user_id, u.account
+     FROM payers p
+     LEFT JOIN users u ON u.user_id = p.owner_user_id
+     WHERE p.payer_id = ? LIMIT 1`,
     [order.payer_id]
   ) : [[]];
 
@@ -110,6 +143,12 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
       ]
     );
     insertedIds.push(result.insertId);
+    if (salesperson?.owner_user_id) {
+      await conn.query(
+        `UPDATE test_items SET current_assignee = ?, status = 'assigned' WHERE test_item_id = ?`,
+        [salesperson.owner_user_id, result.insertId]
+      );
+    }
     const assignedTo = supervisorAccount || salesperson?.account || null;
     if (assignedTo) {
       await conn.query(
@@ -122,4 +161,18 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
   return insertedIds;
 }
 
-module.exports = { applyOrderModification, appendOrderTestItems };
+async function getOrderTestItemsForFlow(conn, orderId) {
+  const [items] = await conn.query(
+    `SELECT ti.test_item_id, ti.sample_name, ti.material, ti.sample_type, ti.original_no,
+            CONCAT_WS(' - ', NULLIF(ti.category_name, ''), NULLIF(ti.detail_name, '')) AS test_item,
+            ti.standard_code AS test_method, ti.quantity, ti.department_id, ti.note,
+            ti.test_code, ti.seq_no, ti.is_add_on
+     FROM test_items ti
+     WHERE ti.order_id = ?
+     ORDER BY ti.test_item_id`,
+    [orderId]
+  );
+  return items;
+}
+
+module.exports = { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow };

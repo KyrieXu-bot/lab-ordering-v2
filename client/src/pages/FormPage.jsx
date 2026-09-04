@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   getCommission,
   createCommission,
-  generateDocument,
+  generateDirectOrderPdf,
   getSalesperson,
   getCustomers,
   getPayers,
@@ -14,8 +14,6 @@ import {
   getCommissionerSignature,
   uploadCommissionerSignature,
   deleteCommissionerSignature,
-  generateSampleFlow,
-  generateOrderTemplate,
   generateProcessTemplate,
   searchOrders,
   checkOrder,
@@ -131,6 +129,91 @@ function buildRequestTemplateData(commissionData, context) {
   };
 }
 
+function buildProcessTemplateData(commissionData, orderNum, selectedCustomer) {
+  const hasDept = id => commissionData.testItems.some(item => String(item.department_id) === String(id));
+  const now = new Date();
+  const receiptDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const machiningItems = [];
+  const mechanicsItems = [];
+  const microItems = [];
+  const physchemItems = [];
+  const chemistryItems = [];
+  commissionData.testItems.forEach((item, index) => {
+    const [namePart, conditionPart] = (item.test_item || '').split(' - ').map(value => value.trim());
+    const row = {
+      idx: index + 1,
+      sample_code: `${orderNum} - ${String(index + 1).padStart(3, '0')}`,
+      test_item: namePart || '',
+      project_code: item.test_code ? (conditionPart ? `${item.test_code}-${conditionPart}` : item.test_code) : '',
+      method: item.test_method,
+      quantity: item.quantity,
+      note: item.note || '',
+      original_no: item.original_no,
+      sample_name: item.sample_name
+    };
+    if (item.test_code && item.test_code.startsWith('LX')) machiningItems.push(row);
+    else if (String(item.department_id) === '3') mechanicsItems.push(row);
+    else if (String(item.department_id) === '1') microItems.push(row);
+    else if (String(item.department_id) === '2') physchemItems.push(row);
+    else if (String(item.department_id) === '6') chemistryItems.push(row);
+  });
+  const reportTypes = commissionData.reportInfo.type || [];
+  const reportSeals = commissionData.orderInfo.report_seals || [];
+  const requirements = commissionData.sampleRequirements;
+  return {
+    order_num: orderNum,
+    customer_name: selectedCustomer?.customer_name || '',
+    customer_contactName: selectedCustomer?.contact_name || '',
+    machiningCenterSymbol: machiningItems.length ? '☑' : '☐',
+    mechanicsSymbol: mechanicsItems.length ? '☑' : '☐',
+    microSymbol: hasDept(1) ? '☑' : '☐',
+    physchemSymbol: hasDept(2) ? '☑' : '☐',
+    chemistrySymbol: hasDept(6) ? '☑' : '☐',
+    sampleReceivedDate: receiptDate,
+    showMechanicsTable: hasDept(3),
+    showMicroTable: hasDept(1),
+    showPhyschemTable: hasDept(2),
+    showChemistryTable: hasDept(6),
+    reportContent1Symbol: reportTypes.includes(1) ? '☑' : '☐',
+    reportContent2Symbol: reportTypes.includes(2) ? '☑' : '☐',
+    reportContent3Symbol: reportTypes.includes(3) ? '☑' : '☐',
+    reportContent6Symbol: reportTypes.includes(6) ? '☑' : '☐',
+    reportSeals1Symbol: reportSeals.includes('normal') ? '☑' : '☐',
+    reportSeals2Symbol: reportSeals.includes('cnas') ? '☑' : '☐',
+    reportSeals3Symbol: reportSeals.includes('cma') ? '☑' : '☐',
+    reportForm1Symbol: commissionData.reportInfo.format_type === '1' ? '☑' : '☐',
+    reportForm2Symbol: commissionData.reportInfo.format_type === '2' ? '☑' : '☐',
+    headerType1Symbol: commissionData.reportInfo.header_type === '1' ? '☑' : '☐',
+    headerType2Symbol: commissionData.reportInfo.header_type === '2' ? '☑' : '☐',
+    header_additional_info: commissionData.reportInfo.header_other || '',
+    ...buildOrderUrgencySymbols(commissionData.orderInfo.order_urgency_type),
+    delivery_days_after_receipt: commissionData.orderInfo.delivery_days_after_receipt,
+    returnNoSymbol: commissionData.sampleHandling.handling_type === '1' ? '☑' : '☐',
+    returnPickupSymbol: commissionData.sampleHandling.handling_type === '2' ? '☑' : '☐',
+    returnMailSymbol: commissionData.sampleHandling.handling_type === '3' ? '☑' : '☐',
+    other_requirements: commissionData.orderInfo.other_requirements || '',
+    hazardSafetySymbol: requirements.hazards.includes('Safety') ? '☑ 无危险性' : null,
+    hazardFlammabilitySymbol: requirements.hazards.includes('Flammability') ? '☑ 易燃易爆' : null,
+    hazardIrritationSymbol: requirements.hazards.includes('Irritation') ? '☑ 刺激性' : null,
+    hazardVolatilitySymbol: requirements.hazards.includes('Volatility') ? '☑ 易挥发' : null,
+    hazardFragileSymbol: requirements.hazards.includes('Fragile') ? '☑ 易碎' : null,
+    hazardOtherSymbol: requirements.hazards.includes('Other') ? `☑ 其他: ${requirements.hazardOther}` : null,
+    magnetismNonMagneticSymbol: requirements.magnetism === 'Non-magnetic' ? '☑ 无磁' : null,
+    magnetismWeakMagneticSymbol: requirements.magnetism === 'Weak-magnetic' ? '☑ 弱磁' : null,
+    magnetismStrongMagneticSymbol: requirements.magnetism === 'Strong-magnetic' ? '☑ 强磁' : null,
+    magnetismUnknownSymbol: requirements.magnetism === 'Unknown' ? '☑ 未知' : null,
+    conductivityConductorSymbol: requirements.conductivity === 'Conductor' ? '☑ 导体' : null,
+    conductivitySemiconductorSymbol: requirements.conductivity === 'Semiconductor' ? '☑ 半导体' : null,
+    conductivityInsulatorSymbol: requirements.conductivity === 'Insulator' ? '☑ 绝缘体' : null,
+    conductivityUnknownSymbol: requirements.conductivity === 'Unknown' ? '☑ 未知' : null,
+    breakableYesSymbol: requirements.breakable === 'yes' ? '☑ 是' : null,
+    brittleYesSymbol: requirements.brittle === 'yes' ? '☑ 是' : null,
+    brittleNoSymbol: requirements.brittle === 'no' ? '☑ 否' : null,
+    projectLeader: '',
+    machiningItems, mechanicsItems, microItems, physchemItems, chemistryItems
+  };
+}
+
 function formatSignatureDate(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -149,12 +232,13 @@ function blobToDataUrl(data) {
 }
 
 function buildOrderMonthPreference(choice, baseDate = new Date()) {
-  const monthOffset = choice === 'next' ? 1 : 0;
+  const normalizedChoice = ['previous', 'current', 'next'].includes(choice) ? choice : 'current';
+  const monthOffset = normalizedChoice === 'previous' ? -1 : normalizedChoice === 'next' ? 1 : 0;
   const targetDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + monthOffset, 1);
   const year = targetDate.getFullYear();
   const month = targetDate.getMonth() + 1;
   return {
-    choice: choice === 'next' ? 'next' : 'current',
+    choice: normalizedChoice,
     year,
     month,
     monthKey: `${year}-${String(month).padStart(2, '0')}`
@@ -173,15 +257,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showPrefillModal, setShowPrefillModal] = useState(false);
   const [showPayerModal, setShowPayerModal] = useState(false);
   const [showPriceModal, setShowPriceModal] = useState(false);
-  const [commissionFileName, setCommissionFileName] = useState('');
-  const [flowFileName, setFlowFileName] = useState('');
   const [showDownloadModal, setShowDownloadModal] = useState(false);
-  const [commissionUrl, setCommissionUrl] = useState('');
-  const [flowUrl, setFlowUrl] = useState('');
-  const [orderTemplateUrl, setOrderTemplateUrl] = useState('');
-  const [processTemplateUrl, setProcessTemplateUrl] = useState('');
-  const [orderTemplateFileName, setOrderTemplateFileName] = useState('');
-  const [processTemplateFileName, setProcessTemplateFileName] = useState('');
+  const [directCreatedOrder, setDirectCreatedOrder] = useState(null);
+  const [directPdfGenerating, setDirectPdfGenerating] = useState(false);
+  const [processTemplateDownloading, setProcessTemplateDownloading] = useState(false);
   const [salespersons, setSalespersons] = useState([]);
   const [salesUserId, setSalesUserId] = useState('');
   const [salesName, setSalesName] = useState('');
@@ -241,7 +320,6 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [attachmentActionId, setAttachmentActionId] = useState(null);
   const [showRequestPreview, setShowRequestPreview] = useState(false);
-  const attachmentInputRef = useRef(null);
 
   // 静态部门数据（与后端 departments 对应）
   const departments = [
@@ -348,8 +426,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         const packet = data.reviewed_payload || data.submitted_payload || {};
         const snapshot = packet.formSnapshot || {};
         const reviewingAdditionalTest = workflowMode === 'review' && data.request_type === 'additional_test';
+        const loadingModificationItems = workflowMode === 'change' || loadedModification;
         let existingOfficialItems = [];
-        if (reviewingAdditionalTest && data.display_order_id) {
+        if ((reviewingAdditionalTest || loadingModificationItems) && data.display_order_id) {
           const { data: existingCommission } = await getCommission(data.display_order_id);
           existingOfficialItems = (existingCommission.testItems || []).map((item) => {
             const { sampleType, sampleTypeCustom, seq_no } = normalizePrefillTestItemFields(item);
@@ -364,7 +443,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               discount_rate: item.discount_rate ?? '',
               service_urgency: item.service_urgency || 'normal',
               seq_no,
-              _locked: true,
+              _locked: reviewingAdditionalTest,
+              _modificationNameLocked: loadingModificationItems,
               _existingOfficial: true
             };
           });
@@ -382,7 +462,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           unit: '',
           discount_rate: '',
           test_item: '',
-          test_method: '',
+          test_method: item.test_method ?? item.testMethod ?? '',
           arrival_mode: item.arrival_mode === 'delivery' ? 'mail' : (item.arrival_mode || ''),
           sample_arrival_status: item.sample_arrival_status || '',
           seq_no: '',
@@ -410,9 +490,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               ? [...existingOfficialItems, ...reviewerPrefillItems]
               : reviewerPrefillItems;
           }
-          const followUpItems = storedBusinessItems.map(item => ({
+          const modificationSourceItems = loadingModificationItems && existingOfficialItems.length
+            ? existingOfficialItems
+            : storedBusinessItems;
+          const followUpItems = modificationSourceItems.map(item => ({
             ...item,
-            _locked: workflowMode === 'change' || workflowMode === 'additionalTest' || loadedModification
+            _locked: workflowMode === 'additionalTest' || loadedAdditionalTest,
+            _modificationNameLocked: loadingModificationItems
           }));
           setFormData({
             ...snapshot.formData,
@@ -575,7 +659,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     test_code: p.test_code,
     test_item: `${p.test_item_name} - ${p.test_condition}`,
     test_condition: p.test_condition,
-    test_method: p.test_standard,
+    // 不写入 test_method，避免选择项目时覆盖业务申请预填的检测标准。
     unit: p.unit || '',
     unit_price: p.amount != null && String(p.amount).trim() !== '' ? p.amount : null,
     department_id: p.department_id,
@@ -940,6 +1024,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   };
 
   const addTestItem = () => {
+    if (isModificationMode) return;
     setFormData(prev => ({ ...prev, testItems: [...prev.testItems, {
       sampleName: '', material: '', sampleType: '', sampleTypeCustom: '', original_no: '',
       test_item: '', test_method: '', quantity: '', unit: '', note: '', flow_note: '', department_id: '', sample_preparation: '', discount_rate: '', service_urgency: 'normal',
@@ -948,7 +1033,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   };
 
   const handleTestItemChange = (index, field, value) => {
-    if (isModificationMode || formData.testItems[index]?._locked) return;
+    if (formData.testItems[index]?._locked || (isModificationMode && field === 'test_item')) return;
     setFormData(prev => ({
       ...prev,
       testItems: prev.testItems.map((item, i) => {
@@ -1070,16 +1155,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       let updated = [...prev.reportType];
       if (code === 1) {
         updated = checked ? [1] : updated.filter(item => item !== 1);
-      } else if (code === 4) {
-        updated = checked ? [4] : updated.filter(item => item !== 4);
-      } else if (code === 5) {
+      } else if ([4, 5].includes(code)) {
         updated = checked
-          ? [...updated.filter(item => ![1, 4].includes(item)), 5]
-          : updated.filter(item => ![2, 3, 5, 6].includes(item));
+          ? [...updated.filter(item => ![1, 4, 5].includes(item)), code]
+          : updated.filter(item => item !== code);
       } else {
-        updated = updated.filter(item => ![1, 2, 3, 4, 6].includes(item));
+        updated = updated.filter(item => ![1, 2, 3, 6].includes(item));
         if (checked) updated.push(code);
-        if (!updated.includes(5)) updated.push(5);
       }
       updated = [...new Set(updated)];
       return {
@@ -1139,6 +1221,40 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   };
 
   const downloadFile = (url, filename) => { const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); };
+
+  const handleProcessTemplateDownload = async (flowData, fallbackFileName) => {
+    if (!flowData || processTemplateDownloading) return;
+    setProcessTemplateDownloading(true);
+    try {
+      const response = await generateProcessTemplate(flowData);
+      const url = URL.createObjectURL(new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+      downloadFile(url, fallbackFileName || `${flowData.order_num || '流转单'}.docx`);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(error.response?.data?.message || error.response?.data?.error || '流转单生成失败，请重试');
+    } finally {
+      setProcessTemplateDownloading(false);
+    }
+  };
+
+  const handleDirectPdfGenerate = async () => {
+    if (!directCreatedOrder || directPdfGenerating) return;
+    setDirectPdfGenerating(true);
+    try {
+      const response = await generateDirectOrderPdf(directCreatedOrder.orderNum, directCreatedOrder.templateData);
+      const url = URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+      const filename = `${directCreatedOrder.orderNum}-${directCreatedOrder.customerName}-${directCreatedOrder.contactName}.pdf`;
+      setDirectCreatedOrder(prev => {
+        if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
+        return prev ? { ...prev, pdfUrl: url, pdfFilename: filename } : prev;
+      });
+      downloadFile(url, filename);
+    } catch (error) {
+      alert(error.response?.data?.message || 'PDF 生成失败，请重试');
+    } finally {
+      setDirectPdfGenerating(false);
+    }
+  };
 
   const handleApprovedPdfGenerate = async () => {
     if (!approvedRequest || approvedPdfGenerating) return;
@@ -1207,15 +1323,17 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     }
   };
 
-  const handleAttachmentSelect = (event) => {
+  const handleAttachmentSelect = (event, kind) => {
     const files = Array.from(event.target.files || []);
     const accepted = [];
     const rejected = [];
     files.forEach((file, index) => {
-      if (file.size > 20 * 1024 * 1024) rejected.push(file.name);
-      else accepted.push({ localId: `${Date.now()}-${index}-${file.name}`, file });
+      const isSupportedImage = /^image\/(png|jpeg)$/i.test(file.type) || /\.(png|jpe?g)$/i.test(file.name);
+      if (file.size > 20 * 1024 * 1024) rejected.push(`${file.name}（超过20MB）`);
+      else if (kind === 'request_image' && !isSupportedImage) rejected.push(`${file.name}（仅支持PNG/JPG）`);
+      else accepted.push({ localId: `${Date.now()}-${index}-${file.name}`, file, kind });
     });
-    if (rejected.length) alert(`以下附件超过 20MB，未加入：\n${rejected.join('\n')}`);
+    if (rejected.length) alert(`以下文件未加入：\n${rejected.join('\n')}`);
     if (accepted.length) setPendingAttachments(prev => [...prev, ...accepted]);
     event.target.value = '';
   };
@@ -1225,7 +1343,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     let latestVersion = requestMeta?.version;
     for (const pending of pendingAttachments) {
       try {
-        const { data } = await uploadOrderRequestFile(targetRequestId, pending.file);
+        const { data } = await uploadOrderRequestFile(targetRequestId, pending.file, pending.kind);
         if (data.version != null) latestVersion = data.version;
         setRequestAttachments(prev => [...prev, data]);
         setPendingAttachments(prev => prev.filter(item => item.localId !== pending.localId));
@@ -1275,6 +1393,16 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (workflowMode === 'request' && selectedCustomer && commissionerSignatureStatus !== 'ready') {
+      if (commissionerSignatureStatus === 'loading' || commissionerSignatureUploading) {
+        alert('正在检测或上传委托方签名，请稍后再提交。');
+      } else if (commissionerSignatureStatus === 'error') {
+        alert('委托方签名检测失败，请刷新页面后重试。');
+      } else {
+        alert('提交失败！该委托方尚未配置电子签名，请先上传签名。');
+      }
+      return;
+    }
     const confirmText = workflowMode === 'review'
       ? '确认开单并将正式内容录入 LIMS 吗？'
       : isModificationMode
@@ -1331,11 +1459,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     const hasNoReport = formData.reportType.includes(1);
     const hasElectronicOnly = formData.reportType.includes(4);
     const hasPrintedReport = formData.reportType.includes(5);
-    if (!hasNoReport && !hasElectronicOnly && !hasPrintedReport) {
+    if (!hasNoReport && Number(hasElectronicOnly) + Number(hasPrintedReport) !== 1) {
       alert('提交失败！请选择报告交付形式'); return;
     }
-    if (hasPrintedReport && languageTypes.length !== 1) {
-      alert('提交失败！选择“电子版+纸质版报告”后，中文、英文、中英文对照报告必须三选一'); return;
+    if (!hasNoReport && languageTypes.length !== 1) {
+      alert('提交失败！中文报告、英文报告、中英文对照报告必须三选一'); return;
     }
     if (hasPrintedReport && !formData.paperReportShippingType) {
       alert('提交失败！请选择纸质版报告寄送地址'); return;
@@ -1345,13 +1473,28 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     }
     if (!hasNoReport && !formData.reportHeader) { alert('提交失败！报告抬头为必填项'); return; }
     if (!hasNoReport && !formData.reportForm) { alert('提交失败！报告对应方式为必填项'); return; }
-    if (formData.testItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
-    if (isAdditionalTestWorkflow && !formData.testItems.some(item => !item._locked)) {
+    let businessMethodIndex = 0;
+    const submissionTestItems = workflowMode === 'review'
+      ? formData.testItems.map((item) => {
+          if (item._locked) return item;
+          const businessItem = businessTestItemsSnapshot[businessMethodIndex++] || {};
+          return {
+            ...item,
+            test_method: businessItem.test_method ?? businessItem.testMethod ?? ''
+          };
+        })
+      : formData.testItems;
+    if (workflowMode === 'review') {
+      setFormData(prev => ({ ...prev, testItems: submissionTestItems }));
+    }
+
+    if (submissionTestItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
+    if (isAdditionalTestWorkflow && !submissionTestItems.some(item => !item._locked)) {
       alert('提交失败！请至少添加一行新的加测项目'); return;
     }
 
-    for (let i = 0; i < formData.testItems.length; i++) {
-      const ti = formData.testItems[i];
+    for (let i = 0; i < submissionTestItems.length; i++) {
+      const ti = submissionTestItems[i];
       if (ti._locked) continue;
       if (isSalesRequestMode) {
         if (!String(ti.sampleName || '').trim()) { alert(`提交失败！第${i + 1}行：样品名称为必填项`); return; }
@@ -1402,8 +1545,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     }
 
     const effectiveTestItems = isAdditionalTestWorkflow
-      ? formData.testItems.filter(item => !item._locked)
-      : formData.testItems;
+      ? submissionTestItems.filter(item => !item._locked)
+      : submissionTestItems;
     const commissionData = {
       customerId: selectedCustomer.customer_id,
       paymentId: selectedPayer.payment_id,
@@ -1416,6 +1559,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         sample_shipping_address: formData.sampleSolutionType === '3' && formData.sampleReturnInfo.returnAddressOption === 'other' ? formData.sampleShippingAddress : null,
         total_price: formData.totalPrice || null,
         order_num: formData.orderNum || null,
+        order_month_preference: workflowMode === 'direct' ? orderMonthPreference : null,
         other_requirements: formData.otherRequirements,
         subcontracting_not_accepted: formData.subcontractingNotAccepted,
         report_seals: formData.reportSeals,
@@ -1441,6 +1585,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       },
       sampleRequirements: formData.sampleRequirements,
       testItems: effectiveTestItems.map(item => ({
+        test_item_id: item.test_item_id || null,
         sample_name: item.sampleName, material: item.material || '',
         sample_type: item.sampleType === '5' ? item.sampleTypeCustom?.trim() : item.sampleType,
         original_no: item.original_no || '', test_item: item.test_item, test_method: item.test_method,
@@ -1514,7 +1659,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         const response = await createOrderFollowUp(requestId, requestType, requestPacket);
         if (pendingAttachments.length) {
           try {
-            for (const pending of pendingAttachments) await uploadOrderRequestFile(response.data.request_id, pending.file);
+            for (const pending of pendingAttachments) await uploadOrderRequestFile(response.data.request_id, pending.file, pending.kind);
           } catch (attachmentError) {
             alert(`申请已提交，但部分附件上传失败：\n${attachmentError.response?.data?.message || attachmentError.message}`);
           }
@@ -1550,10 +1695,16 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     if (workflowMode === 'review') {
       try {
         const response = await openOrderRequest(requestId, requestPacket, requestMeta?.version);
+        const openedOrderNum = response.data.orderNum;
+        const flowCommissionData = Array.isArray(response.data.flowTestItems) && response.data.flowTestItems.length
+          ? { ...commissionData, testItems: response.data.flowTestItems }
+          : commissionData;
         setApprovedRequest({
           requestId,
-          orderNum: response.data.orderNum,
+          orderNum: openedOrderNum,
           pdfReady: false,
+          flowData: buildProcessTemplateData(flowCommissionData, openedOrderNum, selectedCustomer),
+          processTemplateFileName: `${openedOrderNum}-${selectedCustomer.customer_name}-${selectedCustomer.contact_name}.docx`,
           generatedMessage: '正式委托单已录入 LIMS，可现在生成 PDF，或稍后在申请队列中生成。'
         });
       } catch (error) {
@@ -1646,10 +1797,6 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         payer_bankAccount: (selectedPayer.bank_account || '')
       };
 
-      const docRes = await generateDocument(templateData);
-      const commissionBlob = new Blob([docRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-      const commissionObjUrl = URL.createObjectURL(commissionBlob);
-
       const hasDept = id => commissionData.testItems.some(i => String(i.department_id) === String(id));
       const now = new Date(); const yyyy = now.getFullYear(); const mm = String(now.getMonth() + 1).padStart(2, '0'); const dd = String(now.getDate()).padStart(2, '0');
       const receiptDate = `${yyyy}-${mm}-${dd}`;
@@ -1736,30 +1883,16 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       const orderNum = response.data.orderNum;
       const custName = selectedCustomer.customer_name;
       const contactName = selectedCustomer.contact_name;
-      const cName = `${orderNum}-${custName}-${contactName}.docx`;
-      const fName = `${orderNum}-${custName}-${contactName}.docx`;
-      setCommissionFileName(cName); setFlowFileName(fName);
-
-      const flowRes = await generateSampleFlow(flowData);
-      const flowBlob = new Blob([flowRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-      const flowObjUrl = window.URL.createObjectURL(flowBlob);
-      
-      // 生成模板文档
-      const orderTemplateRes = await generateOrderTemplate(templateData);
-      const orderTemplateBlob = new Blob([orderTemplateRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-      const orderTemplateObjUrl = window.URL.createObjectURL(orderTemplateBlob);
-      
-      const processTemplateRes = await generateProcessTemplate(flowData);
-      const processTemplateBlob = new Blob([processTemplateRes.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-      const processTemplateObjUrl = window.URL.createObjectURL(processTemplateBlob);
-      
-      setCommissionUrl(commissionObjUrl); 
-      setFlowUrl(flowObjUrl);
-      setOrderTemplateUrl(orderTemplateObjUrl);
-      setProcessTemplateUrl(processTemplateObjUrl);
-      // 前端下载的模板文件名也按新规范
-      setOrderTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
-      setProcessTemplateFileName(`${orderNum}-${custName}-${contactName}.docx`);
+      setDirectCreatedOrder({
+        orderNum,
+        customerName: custName,
+        contactName,
+        templateData,
+        flowData,
+        processTemplateFileName: `${orderNum}-${custName}-${contactName}.docx`,
+        pdfUrl: '',
+        pdfFilename: ''
+      });
       setShowDownloadModal(true);
     } catch (error) {
       const msg = error.response?.data?.message || '服务器出现错误，请重试';
@@ -1815,19 +1948,22 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       : workflowMode === 'edit'
         ? '修改后保存，申请将继续等待开单员审批'
       : isModificationMode
-        ? '检测项目保持不变；修改过的字段会用红色标记，并重新提交审批'
+        ? '检测项目名称保持不变，其他项目信息可修改；修改痕迹会在预览中标记'
       : isAdditionalTestMode
         ? '原委托信息和原检测项目保持只读，仅允许新增加测项目'
       : workflowMode === 'direct'
         ? '直接创建正式委托单，可使用实验室转单功能'
         : '填写完成后将提交给开单员审批';
   const requestStatusLabel = requestMeta
-    ? ({ submitted: '待审批', approved: '已通过', returned: '已退回', withdrawn: '已撤回' }[requestMeta.status] || requestMeta.status)
+    ? (requestMeta.status === 'approved'
+      ? (requestMeta.orderOpened ? '已开单' : '待开单')
+      : ({ submitted: '待审批', returned: '已驳回', withdrawn: '已撤回' }[requestMeta.status] || requestMeta.status))
     : '';
+  const previousMonthOption = buildOrderMonthPreference('previous');
   const currentMonthOption = buildOrderMonthPreference('current');
   const nextMonthOption = buildOrderMonthPreference('next');
   return (
-    <div className={`workflow-form-page${isReadOnly ? ' workflow-readonly-mode' : ''}${isModificationMode ? ' workflow-change-mode' : ''}${isAdditionalTestWorkflow ? ' workflow-additional-test-mode' : ''}`}>
+    <div className={`workflow-form-page${isReadOnly ? ' workflow-readonly-mode' : ''}${workflowMode === 'review' ? ' workflow-review-mode' : ''}${isModificationMode ? ' workflow-change-mode' : ''}${isAdditionalTestWorkflow ? ' workflow-additional-test-mode' : ''}`}>
       <div className="workflow-toolbar">
         <button type="button" onClick={() => navigate('/')}>← 返回列表</button>
         <div>
@@ -1904,7 +2040,17 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             </div>
             <div className="order-month-selector" role="group" aria-label="期望委托单月份">
               <strong className="order-month-title">委托单期望月份</strong>
-              <div className="order-month-options">
+              <div className={`order-month-options${workflowMode === 'direct' ? ' has-previous' : ''}`}>
+                {workflowMode === 'direct' && (
+                  <button
+                    type="button"
+                    className={`order-month-option previous${orderMonthPreference?.choice === 'previous' ? ' is-selected' : ''}`}
+                    aria-pressed={orderMonthPreference?.choice === 'previous'}
+                    onClick={() => setOrderMonthPreference(previousMonthOption)}
+                  >
+                    <b>上月</b>
+                  </button>
+                )}
                 <button
                   type="button"
                   className={`order-month-option current${orderMonthPreference?.choice === 'current' ? ' is-selected' : ''}`}
@@ -2217,20 +2363,20 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               <div className="report-version-option">
                 <label><input type="checkbox" onChange={(e) => handleReportTypeChange('测试图片或数据汇总(无需测试报告) Test pictures or data summaries(No test report)', e.target.checked)} checked={formData.reportType.includes(1)} />测试图片或数据汇总（无需测试报告） <span>Test pictures or data summaries (No test report)</span></label>
               </div>
-              <div className="report-version-option report-delivery-section">
-                <div className="report-subsection-title">交付形式 <small>Delivery format</small></div>
-                <div className="report-inline-options">
-                  <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('仅电子版报告', true)} checked={formData.reportType.includes(4)} />仅电子版报告 <span>E-report only</span></label>
-                  <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('电子版+纸质版报告', true)} checked={formData.reportType.includes(5)} />电子版+纸质版报告 <span>Electronic + Printed report</span></label>
-                </div>
-                {formData.reportType.includes(5) && (
+              {!formData.reportType.includes(1) && (
+                <div className="report-version-option report-delivery-section">
+                  <div className="report-subsection-title">交付形式 <small>Delivery format</small></div>
+                  <div className="report-inline-options">
+                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('仅电子版报告', true)} checked={formData.reportType.includes(4)} />仅电子版报告 <span>E-report only</span></label>
+                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('电子版+纸质版报告', true)} checked={formData.reportType.includes(5)} />电子版+纸质版报告 <span>Electronic + Printed report</span></label>
+                  </div>
                   <div className="report-language-options">
                     <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中文报告 Chinese report', true)} checked={formData.reportType.includes(2)} />中文报告 <span>Chinese report</span></label>
                     <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('英文报告 English report', true)} checked={formData.reportType.includes(3)} />英文报告 <span>English report</span></label>
                     <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中英文对照报告Chinese-English bilingual report', true)} checked={formData.reportType.includes(6)} />中英文对照报告 <span>Chinese-English bilingual report</span></label>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2244,22 +2390,22 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                   <label><input type="checkbox" value="cma" checked={formData.reportSeals.includes('cma')} onChange={handleReportSealsChange} />CMA</label>
                 </div>
               </div>
-              {formData.reportType.includes(5) && (
-                <div className="report-row">
-                  <div className="report-row-label">纸质版寄送地址<br/><small>Mailing address</small></div>
-                  <div className="report-row-content report-mailing-options">
-                    <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} />邮寄到委托方 <span>To the applicant</span></label>
-                    <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} />邮寄到付款方 <span>To the payer</span></label>
-                    <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} />其他 <span>Others</span></label>
-                    {formData.paperReportShippingType === '3' && <input className="report-address-input" type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} placeholder="请输入地址、收件人和电话" />}
-                  </div>
-                </div>
-              )}
             </>
+          )}
+          {formData.reportType.includes(5) && (
+            <div className="report-row">
+              <div className="report-row-label">纸质版寄送地址<br/><small>Mailing address</small></div>
+              <div className="report-row-content report-mailing-options">
+                <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} />邮寄到委托方 <span>To the applicant</span></label>
+                <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} />邮寄到付款方 <span>To the payer</span></label>
+                <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} />其他 <span>Others</span></label>
+                {formData.paperReportShippingType === '3' && <input className="report-address-input" type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} placeholder="请输入地址、收件人和电话" />}
+              </div>
+            </div>
           )}
         </fieldset>
 
-        {!(formData.reportType.length === 1 && formData.reportType.includes(1)) && (<>
+        {!formData.reportType.includes(1) && (<>
           <fieldset>
             <legend>报告抬头 Report Header&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportHeaderOptions).map(option => (
@@ -2295,7 +2441,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           <section className="business-test-snapshot">
             <h3>业务申请检测项目</h3>
             <p>以下内容为业务提交时的原始填写，仅供开单录入参考。</p>
-            <div className="test-item-table-wrapper">
+            <div className="test-item-table-wrapper business-snapshot-scroll">
               <table className="business-snapshot-table">
                 <thead>
                   <tr>
@@ -2346,7 +2492,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         {isSalesRequestMode ? (
           <>
             <h3>检测项目</h3>
-            <div className="test-item-table-wrapper">
+            <div className="test-item-table-wrapper business-entry-scroll">
               <table className="business-test-item-table">
                 <thead>
                   <tr>
@@ -2373,13 +2519,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                       ? (item.sampleTypeCustom || '')
                       : (mappedSampleType || item.sampleType || '');
                     return (
-                      <tr key={index} className={(isModificationMode || item._locked) ? 'locked-test-item-row' : (isAdditionalTestMode ? 'additional-new-test-row' : '')}>
+                      <tr key={index} className={item._locked ? 'locked-test-item-row' : (isModificationMode ? 'modification-test-item-row' : (isAdditionalTestMode ? 'additional-new-test-row' : ''))}>
                         <td className="num">{index + 1}</td>
                         <td><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
                         <td><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
                         <td><input type="text" value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
                         <td><input type="text" value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
-                        <td><input type="text" value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} /></td>
+                        <td><input type="text" value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
                         <td><input type="text" value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
                         <td className="business-choice-cell">
                           {arrivalMethodOptions.map(option => (
@@ -2422,7 +2568,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                         <td><input type="text" value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
                         <td className="action-col add-remove-buttons">
                           {!(isModificationMode || item._locked) && <><button type="button" className="copy-button" onClick={() => duplicateTestItem(index)}>复制</button><button type="button" className="remove-button" onClick={() => removeTestItem(index)}>删除</button></>}
-                          {(isModificationMode || item._locked) && <span className="locked-item-label">原项目</span>}
+                          {(isModificationMode || item._locked) && <span className="locked-item-label">{isModificationMode ? '项目名称已锁定' : '原项目'}</span>}
                         </td>
                       </tr>
                     );
@@ -2436,7 +2582,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         <>
         {(workflowMode !== 'view' || formData.testItems.length > 0) && <h3>{workflowMode === 'review' ? '正式检测项目录入' : '检测项目'}</h3>}
         {(workflowMode !== 'view' || formData.testItems.length > 0) && <>
-        <div className="test-item-table-wrapper">
+        <div className="test-item-table-wrapper formal-entry-scroll">
           <table className="test-item-table">
             <thead>
               <tr>
@@ -2620,7 +2766,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             </tbody>
           </table>
         </div>
-        <div className="add-test-item-button"><button type="button" onClick={addTestItem}>添加新项目</button></div>
+        {!isModificationMode && <div className="add-test-item-button"><button type="button" onClick={addTestItem}>添加新项目</button></div>}
         </>}
         </>
         )}
@@ -2655,57 +2801,50 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                   <strong>附件</strong>
                   <span>单个文件不超过 20MB</span>
                 </div>
-                <div className="request-attachments-list">
-                  {requestAttachments.length === 0 && pendingAttachments.length === 0 && (
-                    <p className="request-attachments-empty">暂无附件</p>
-                  )}
-                  {pendingAttachments.map((pending) => (
-                    <div className="request-attachment-item is-pending" key={pending.localId}>
-                      <div>
-                        <strong>{pending.file.name}</strong>
-                        <span>{formatAttachmentSize(pending.file.size)} · 待提交</span>
+                {[
+                  { kind: 'request_image', title: '附件图片', hint: 'PNG/JPG，生成PDF时每张图片单独一页', accept: 'image/png,image/jpeg,.png,.jpg,.jpeg' },
+                  { kind: 'test_requirement', title: '测试需求单', hint: '支持Word、Excel及其他文件格式', accept: undefined }
+                ].map((group) => {
+                  const pendingFiles = pendingAttachments.filter((item) => item.kind === group.kind);
+                  const uploadedFiles = requestAttachments.filter((item) => group.kind === 'request_image'
+                    ? item.file_type === 'request_image'
+                    : item.file_type !== 'request_image');
+                  return (
+                    <section className={`request-attachment-group is-${group.kind}`} key={group.kind}>
+                      <div className="request-attachment-group-heading"><strong>{group.title}</strong><small>{group.hint}</small></div>
+                      <div className="request-attachments-list">
+                        {uploadedFiles.length === 0 && pendingFiles.length === 0 && <p className="request-attachments-empty">暂无文件</p>}
+                        {pendingFiles.map((pending) => (
+                          <div className="request-attachment-item is-pending" key={pending.localId}>
+                            <div><strong>{pending.file.name}</strong><span>{formatAttachmentSize(pending.file.size)} · 待提交</span></div>
+                            <button type="button" className="request-attachment-remove" aria-label={`移除附件 ${pending.file.name}`} title="移除" onClick={() => setPendingAttachments(prev => prev.filter(item => item.localId !== pending.localId))}>❌</button>
+                          </div>
+                        ))}
+                        {uploadedFiles.map((attachment) => (
+                          <div className="request-attachment-item" key={attachment.file_id}>
+                            <div>
+                              <a href="#" onClick={(event) => { event.preventDefault(); handleAttachmentDownload(attachment); }}>
+                                {attachmentActionId === `download-${attachment.file_id}` ? '下载中…' : attachment.original_filename}
+                              </a>
+                              <span>{formatAttachmentSize(attachment.file_size)}</span>
+                            </div>
+                            {attachment.can_delete && ['edit', 'review'].includes(workflowMode) && (
+                              <button type="button" className="request-attachment-remove" aria-label={`删除附件 ${attachment.original_filename}`} title="删除" onClick={() => handleAttachmentDelete(attachment)} disabled={Boolean(attachmentActionId)}>❌</button>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                      <button
-                        type="button"
-                        className="request-attachment-remove"
-                        aria-label={`移除附件 ${pending.file.name}`}
-                        title="移除"
-                        onClick={() => setPendingAttachments(prev => prev.filter(item => item.localId !== pending.localId))}
-                      >❌</button>
-                    </div>
-                  ))}
-                  {requestAttachments.map((attachment) => (
-                    <div className="request-attachment-item" key={attachment.file_id}>
-                      <div>
-                        <a
-                          href="#"
-                          onClick={(event) => { event.preventDefault(); handleAttachmentDownload(attachment); }}
-                        >
-                          {attachmentActionId === `download-${attachment.file_id}` ? '下载中…' : attachment.original_filename}
-                        </a>
-                        <span>{formatAttachmentSize(attachment.file_size)}</span>
-                      </div>
-                      {attachment.can_delete && ['edit', 'review'].includes(workflowMode) && (
-                        <button
-                          type="button"
-                          className="request-attachment-remove"
-                          aria-label={`删除附件 ${attachment.original_filename}`}
-                          title="删除"
-                          onClick={() => handleAttachmentDelete(attachment)}
-                          disabled={Boolean(attachmentActionId)}
-                        >❌</button>
+                      {isSalesRequestMode && (
+                        <label className="request-attachment-upload">
+                          <input type="file" multiple accept={group.accept} onChange={(event) => handleAttachmentSelect(event, group.kind)} />
+                          <span>＋ 上传{group.title}</span>
+                        </label>
                       )}
-                    </div>
-                  ))}
-                </div>
-                {isSalesRequestMode && (
-                  <label className="request-attachment-upload">
-                    <input ref={attachmentInputRef} type="file" multiple onChange={handleAttachmentSelect} />
-                    <span>＋ 上传文件</span>
-                  </label>
-                )}
+                    </section>
+                  );
+                })}
                 {requestMeta?.status === 'approved' && (
-                  <small>审批通过后的附件请在 LIMS 中管理。</small>
+                  <small>测试需求单在 LIMS 中管理；附件图片随委托单 PDF 查看。</small>
                 )}
               </aside>
             )}
@@ -2834,7 +2973,12 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         {!isReadOnly && (
           <div className={`workflow-submit-actions${isSalesRequestMode ? ' has-preview' : ''}`}>
             {isSalesRequestMode && <button type="button" className="request-preview-button" onClick={() => setShowRequestPreview(true)}>预览</button>}
-            <button type="submit" className="submit">
+            <button
+              type="submit"
+              className="submit"
+              disabled={workflowMode === 'request' && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready'}
+              title={workflowMode === 'request' && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready' ? '请先上传委托方电子签名' : undefined}
+            >
               {workflowMode === 'review'
                 ? '确认开单'
                 : isModificationMode
@@ -2853,11 +2997,16 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         <OrderRequestPreviewModal
           open={showRequestPreview}
           onClose={() => setShowRequestPreview(false)}
+          requestId={requestId}
+          imageAttachments={[
+            ...requestAttachments.filter((item) => item.file_type === 'request_image'),
+            ...pendingAttachments.filter((item) => item.kind === 'request_image')
+          ]}
           packet={{
-            formSnapshot: { formData, businessTestItems: formData.testItems, selectedCustomer, selectedPayer, orderMonthPreference, salesUserId, salesName, salesEmail, salesPhone },
+            formSnapshot: { formData, businessTestItems: isAdditionalTestWorkflow ? formData.testItems.filter((item) => !item._locked) : formData.testItems, selectedCustomer, selectedPayer, orderMonthPreference, salesUserId, salesName, salesEmail, salesPhone },
             templateData: { sales_user_id: salesUserId, sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone, sales_signature_date: salesSignatureDate }
           }}
-          requestMeta={requestMeta}
+          requestMeta={isAdditionalTestWorkflow ? { ...(requestMeta || {}), request_type: 'additional_test' } : requestMeta}
           commissionerSignatureUrl={commissionerSignatureUrl}
           salesSignatureUrl={salesSignatureUrl}
         />
@@ -2991,20 +3140,22 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       </form>
 
       {showDownloadModal && (
-        <div className="modal">
+        <div className="modal workflow-success-modal">
           <div className="modal-content">
-            <h2>文件已生成</h2>
-            <p>请分别点击下面按钮下载：</p>
-            <div className='decide-button'>
-              <button onClick={() => downloadFile(orderTemplateUrl, orderTemplateFileName)}>下载委托单模板</button>
-              <button onClick={() => downloadFile(processTemplateUrl, processTemplateFileName)}>下载流转单模板</button>
-              <button onClick={() => { 
-                URL.revokeObjectURL(commissionUrl); 
-                URL.revokeObjectURL(flowUrl); 
-                URL.revokeObjectURL(orderTemplateUrl); 
-                URL.revokeObjectURL(processTemplateUrl); 
-                setShowDownloadModal(false); 
-                window.location.href = '/'; 
+            <div className="success-check">✓</div>
+            <h2>开单成功</h2>
+            <p>正式委托单号：<strong>{directCreatedOrder?.orderNum}</strong></p>
+            <p className="success-hint">{directPdfGenerating ? '生成中，约需 8–10 秒，请勿刷新。' : '可生成委托单 PDF，或下载流转单。'}</p>
+            <div className='decide-button review-success-actions'>
+              {directCreatedOrder?.pdfUrl
+                ? <button type="button" className="pdf-download-action" onClick={() => downloadFile(directCreatedOrder.pdfUrl, directCreatedOrder.pdfFilename)}>下载PDF</button>
+                : <button type="button" className="pdf-generate-action" onClick={handleDirectPdfGenerate} disabled={directPdfGenerating}>{directPdfGenerating ? '生成中…' : '生成PDF'}</button>}
+              <button type="button" onClick={() => handleProcessTemplateDownload(directCreatedOrder?.flowData, directCreatedOrder?.processTemplateFileName)} disabled={processTemplateDownloading}>{processTemplateDownloading ? '生成中…' : '下载流转单'}</button>
+              <button type="button" className="secondary" onClick={() => {
+                if (directCreatedOrder?.pdfUrl) URL.revokeObjectURL(directCreatedOrder.pdfUrl);
+                setShowDownloadModal(false);
+                setDirectCreatedOrder(null);
+                navigate('/');
               }}>关闭</button>
             </div>
           </div>
@@ -3034,7 +3185,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               {approvedRequest.pdfReady
                 ? <button type="button" className="pdf-download-action" onClick={handleApprovedPdfDownload}>下载PDF</button>
                 : <button type="button" className="pdf-generate-action" onClick={handleApprovedPdfGenerate} disabled={approvedPdfGenerating}>{approvedPdfGenerating ? '生成中…' : '生成PDF'}</button>}
-              <button type="button" className="secondary" onClick={() => navigate('/')}>返回列表</button>
+              <button type="button" onClick={() => handleProcessTemplateDownload(approvedRequest.flowData, approvedRequest.processTemplateFileName)} disabled={processTemplateDownloading}>{processTemplateDownloading ? '生成中…' : '下载流转单'}</button>
+              <button type="button" className="secondary" onClick={() => navigate('/')}>关闭</button>
             </div>
           </div>
         </div>

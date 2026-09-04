@@ -26,8 +26,9 @@ export const createOrderFollowUp = (id, requestType, payload) =>
 export const updateOrderRequest = (id, payload, version) =>
   axios.put(`/api/order-requests/${id}`, { payload, version })
 export const getOrderRequestFiles = (id) => axios.get(`/api/order-requests/${id}/files`)
-export const uploadOrderRequestFile = (id, file) => {
+export const uploadOrderRequestFile = (id, file, kind = 'test_requirement') => {
   const formData = new FormData()
+  formData.append('kind', kind)
   formData.append('file', file)
   return axios.post(`/api/order-requests/${id}/files`, formData)
 }
@@ -45,9 +46,13 @@ export const generateOrderRequestPdf = (id) =>
   axios.post(`/api/order-requests/${id}/generate-pdf`)
 export const downloadOrderRequestAttachment = (id) =>
   axios.get(`/api/order-requests/${id}/attachment`, { responseType: 'blob' })
+export const downloadOrderRequestFlow = (id) =>
+  axios.get(`/api/order-requests/${id}/flow-document`, { responseType: 'blob' })
 
 export const getCommission = (orderNum) => axios.get('/api/commission', { params: { orderNum } })
 export const createCommission = (data) => axios.post('/api/commission', data)
+export const generateDirectOrderPdf = (orderNum, templateData) =>
+  axios.post(`/api/commission/${encodeURIComponent(orderNum)}/generate-pdf`, { templateData }, { responseType: 'blob' })
 
 export const generateDocument = (data) =>
   axios.post('/api/documents/commission', data, { responseType: 'blob' })
