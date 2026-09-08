@@ -48,6 +48,8 @@ export const downloadOrderRequestAttachment = (id) =>
   axios.get(`/api/order-requests/${id}/attachment`, { responseType: 'blob' })
 export const downloadOrderRequestFlow = (id) =>
   axios.get(`/api/order-requests/${id}/flow-document`, { responseType: 'blob' })
+export const downloadOrderRequestTestItemsWord = (id) =>
+  axios.get(`/api/order-requests/${id}/test-items-document`, { responseType: 'blob' })
 
 export const getCommission = (orderNum) => axios.get('/api/commission', { params: { orderNum } })
 export const createCommission = (data) => axios.post('/api/commission', data)

@@ -1,4 +1,11 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({
+  path: path.resolve(
+    __dirname,
+    '..',
+    process.env.NODE_ENV === 'production' ? '.env.prod' : '.env'
+  ),
+});
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -23,10 +30,17 @@ const { router: commissionerSignaturesRouter } = require('./routes/commissionerS
 
 const app = express();
 app.use(cors());
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      upgradeInsecureRequests: null,
+    },
+  },
+}));
 app.use(express.json());
 app.use(morgan('dev'));
-app.use('/uploads', express.static(require('path').join(__dirname, '..', 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 app.use('/api/auth', authRouter);
@@ -47,6 +61,20 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/order-requests', orderRequestsRouter);
 app.use('/api/commissioner-signatures', commissionerSignaturesRouter);
+
+if (process.env.NODE_ENV === 'production') {
+  const clientDistPath = path.resolve(__dirname, '..', '..', 'client', 'dist');
+  app.use(express.static(clientDistPath));
+  app.get('*', (req, res, next) => {
+    if (
+      req.path === '/api' || req.path.startsWith('/api/') ||
+      req.path === '/uploads' || req.path.startsWith('/uploads/')
+    ) {
+      return next();
+    }
+    return res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+}
 
 app.use((error, req, res, next) => {
   console.error(error);

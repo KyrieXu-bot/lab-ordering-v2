@@ -10,6 +10,68 @@ const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
 const { addSampleFlowQrToPdf } = require('../services/sampleFlowQr');
 const router = express.Router();
+const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
+
+async function createDirectOrderRequest(conn, payload, orderId, reviewerUserId) {
+  const [[applicant]] = await conn.query(
+    `SELECT user_id FROM users
+     WHERE name = '马婷' AND is_active = 1
+     ORDER BY user_id LIMIT 1`
+  );
+  if (!applicant) {
+    throw Object.assign(new Error('未找到有效的申请人“马婷”，无法同步申请队列'), { status: 409 });
+  }
+
+  const sourcePacket = payload?.directRequestPayload && typeof payload.directRequestPayload === 'object'
+    ? payload.directRequestPayload
+    : { commissionData: payload, formSnapshot: { formData: { testItems: payload?.testItems || [] }, businessTestItems: payload?.testItems || [] } };
+  const requestPacket = JSON.parse(JSON.stringify(sourcePacket));
+  requestPacket.workflow = {
+    ...(requestPacket.workflow || {}),
+    requestType: 'normal',
+    directCreated: true,
+    reservedOrderId: orderId,
+    openedAt: new Date().toISOString()
+  };
+  requestPacket.commissionData = requestPacket.commissionData || payload;
+  requestPacket.commissionData.orderInfo = {
+    ...(requestPacket.commissionData.orderInfo || {}),
+    order_num: orderId
+  };
+  requestPacket.templateData = { ...(requestPacket.templateData || {}), order_num: orderId };
+  requestPacket.formSnapshot = requestPacket.formSnapshot || {};
+  requestPacket.formSnapshot.businessTestItems = Array.isArray(requestPacket.formSnapshot.businessTestItems)
+    ? requestPacket.formSnapshot.businessTestItems
+    : (requestPacket.commissionData.testItems || []);
+  requestPacket.formSnapshot.formData = {
+    ...(requestPacket.formSnapshot.formData || {}),
+    orderNum: orderId,
+    testItems: Array.isArray(requestPacket.formSnapshot.formData?.testItems)
+      ? requestPacket.formSnapshot.formData.testItems
+      : (requestPacket.commissionData.testItems || [])
+  };
+
+  const [result] = await conn.query(
+    `INSERT INTO order_requests
+      (applicant_user_id, reviewer_user_id, status, request_type, customer_id, payer_id, commissioner_id,
+       submitted_payload, reviewed_payload, schema_version, approved_order_id,
+       submitted_at, reviewed_at, applied_at)
+     VALUES (?, ?, 'approved', 'normal', ?, ?, ?, ?, ?, 2, ?,
+             CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
+    [
+      applicant.user_id,
+      reviewerUserId || applicant.user_id,
+      payload.customerId || null,
+      payload.paymentId || null,
+      payload.commissionerId || null,
+      JSON.stringify(requestPacket),
+      JSON.stringify(requestPacket),
+      orderId
+    ]
+  );
+  await conn.query('UPDATE order_requests SET root_request_id = request_id WHERE request_id = ?', [result.insertId]);
+  return result.insertId;
+}
 
 function safeFilePart(value, fallback = '未填写') {
   const text = String(value || fallback).trim();
@@ -774,9 +836,13 @@ async function createCommissionFromPayload(payload, options = {}) {
       }
     }
 
+    let directRequestId = null;
+    if (ownsConnection && options.recordDirectRequest) {
+      directRequestId = await createDirectOrderRequest(conn, payload, order_id, options.operatorUserId);
+    }
     if (ownsConnection) await conn.commit();
     try { console.log('[commission][POST] committed', { order_id }); } catch (_) {}
-    return { orderNum: order_id };
+    return { orderNum: order_id, ...(directRequestId ? { requestId: directRequestId } : {}) };
   } catch (e) {
     if (ownsConnection) await (conn.rollback().catch(()=>{}));
     try { console.error('[commission][POST] error', { message: e.message, status: e.status || 500 }); } catch (_) {}
@@ -791,7 +857,10 @@ async function createCommissionFromPayload(payload, options = {}) {
 
 router.post('/', requireReviewer, async (req, res, next) => {
   try {
-    const result = await createCommissionFromPayload(req.body, { operatorUserId: req.user.user_id });
+    const result = await createCommissionFromPayload(req.body, {
+      operatorUserId: req.user.user_id,
+      recordDirectRequest: true
+    });
     res.status(201).json(result);
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -805,8 +874,9 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
   let lockName = null;
   let lockAcquired = false;
   let committed = false;
+  let orderNum = String(req.params.orderNum || '').trim();
+  let pdfStage = '校验请求';
   try {
-    const orderNum = String(req.params.orderNum || '').trim();
     const templateData = req.body?.templateData;
     if (!orderNum || !templateData || typeof templateData !== 'object') {
       return res.status(400).json({ message: '缺少委托单号或 PDF 模板数据' });
@@ -815,6 +885,7 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
       return res.status(400).json({ message: 'PDF 模板中的委托单号与当前委托单不一致' });
     }
 
+    pdfStage = '读取委托单';
     const [[order]] = await conn.query('SELECT order_id FROM orders WHERE order_id = ?', [orderNum]);
     if (!order) return res.status(404).json({ message: '正式委托单不存在' });
     const [testItems] = await conn.query(
@@ -823,6 +894,7 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     );
     if (!testItems.length) return res.status(409).json({ message: '正式委托单下没有检测项目，无法关联 PDF 附件' });
 
+    pdfStage = '获取生成锁';
     lockName = `direct_order_pdf_${orderNum}`;
     const [[lockResult]] = await conn.query('SELECT GET_LOCK(?, 0) AS acquired', [lockName]);
     lockAcquired = Number(lockResult?.acquired) === 1;
@@ -832,19 +904,23 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     const customerName = safeFilePart(templateData.customer_name, '委托方');
     const contactName = safeFilePart(templateData.customer_contactName, '联系人');
     const baseName = `${orderId}-${customerName}-${contactName}`;
-    const absoluteDir = path.join(__dirname, '..', '..', 'uploads', 'direct-orders', orderId);
+    const absoluteDir = path.join(uploadsRoot, 'direct-orders', orderId);
     await fs.mkdir(absoluteDir, { recursive: true });
     const { storageBaseName, docxPath, pdfPath } = await nextDirectPdfPaths(absoluteDir, baseName);
     createdPaths.push(docxPath, pdfPath);
 
+    pdfStage = '生成 Word 模板';
     await fs.writeFile(docxPath, await generateOrderTemplateBuffer(templateData));
-    await convertDocxToPdf(docxPath, pdfPath);
+    pdfStage = 'Word 转 PDF';
+    const conversion = await convertDocxToPdf(docxPath, pdfPath);
+    pdfStage = '写入流转二维码';
     await addSampleFlowQrToPdf(pdfPath, `DIRECT_${orderNum}`);
     const pdfStat = await fs.stat(pdfPath);
     if (!pdfStat.size) throw new Error('生成的 PDF 文件为空');
 
     const filename = `${baseName}.pdf`;
     const projectFilepath = pdfPath.replace(/\\/g, '/');
+    pdfStage = '关联 LIMS 附件';
     await conn.beginTransaction();
     await conn.query(
       `DELETE FROM project_files
@@ -859,6 +935,25 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
         [filename, projectFilepath, orderNum, testItem.test_item_id, req.user.user_id]
       );
     }
+    const [[directRequest]] = await conn.query(
+      `SELECT request_id FROM order_requests
+       WHERE request_type = 'normal' AND approved_order_id = ?
+       ORDER BY request_id DESC LIMIT 1 FOR UPDATE`,
+      [orderNum]
+    );
+    if (directRequest) {
+      const storedPath = path.relative(uploadsRoot, pdfPath).replace(/\\/g, '/');
+      const [fileResult] = await conn.query(
+        `INSERT INTO order_request_files
+          (request_id, file_type, original_filename, stored_path, mime_type, file_size, created_by)
+         VALUES (?, 'application_pdf', ?, ?, 'application/pdf', ?, ?)`,
+        [directRequest.request_id, filename, storedPath, pdfStat.size, req.user.user_id]
+      );
+      await conn.query(
+        'UPDATE order_requests SET attachment_file_id = ?, version = version + 1 WHERE request_id = ?',
+        [fileResult.insertId, directRequest.request_id]
+      );
+    }
     await conn.commit();
     committed = true;
     await fs.rm(docxPath, { force: true }).catch(() => {});
@@ -866,12 +961,24 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     res.type('application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
     res.setHeader('X-Generated-Filename', encodeURIComponent(filename));
+    res.setHeader('X-PDF-Conversion-Engine', conversion.engine);
     res.sendFile(pdfPath);
   } catch (error) {
     await conn.rollback().catch(() => {});
     if (!committed) await Promise.all(createdPaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => {})));
-    if (error.status) return res.status(error.status).json({ message: error.message });
-    next(error);
+    console.error('[commission][generate-pdf] failed', {
+      orderNum,
+      stage: pdfStage,
+      code: error.code || 'PDF_GENERATION_FAILED',
+      status: error.status || 500,
+      message: error.message,
+      stack: error.stack
+    });
+    return res.status(error.status || 500).json({
+      message: error.status ? error.message : `PDF 生成失败（阶段：${pdfStage}），请联系管理员查看服务器日志`,
+      code: error.code || 'PDF_GENERATION_FAILED',
+      stage: pdfStage
+    });
   } finally {
     if (lockAcquired) await conn.query('SELECT RELEASE_LOCK(?)', [lockName]).catch(() => {});
     conn.release();
@@ -1187,4 +1294,4 @@ router.get('/check-order', async (req, res, next) => {
   }
 });
 
-module.exports = { router, createCommissionFromPayload };
+module.exports = { router, createCommissionFromPayload, createDirectOrderRequest };

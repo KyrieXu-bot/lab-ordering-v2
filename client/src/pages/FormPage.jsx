@@ -14,7 +14,6 @@ import {
   getCommissionerSignature,
   uploadCommissionerSignature,
   deleteCommissionerSignature,
-  generateProcessTemplate,
   searchOrders,
   checkOrder,
   getOrderRequest,
@@ -27,7 +26,7 @@ import {
   deleteOrderRequestFile,
   openOrderRequest,
   generateOrderRequestPdf,
-  downloadOrderRequestAttachment
+  downloadOrderRequestTestItemsWord
 } from '../api/api';
 import { useNavigate } from 'react-router-dom';
 import { getSession } from '../auth';
@@ -252,6 +251,19 @@ function formatAttachmentSize(value) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+async function apiErrorMessage(error, fallback) {
+  const responseData = error?.response?.data;
+  if (typeof Blob !== 'undefined' && responseData instanceof Blob) {
+    try {
+      const body = JSON.parse(await responseData.text());
+      return body?.message || fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  return responseData?.message || fallback;
+}
+
 function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [showPrefillModal, setShowPrefillModal] = useState(false);
@@ -259,8 +271,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showPriceModal, setShowPriceModal] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [directCreatedOrder, setDirectCreatedOrder] = useState(null);
-  const [directPdfGenerating, setDirectPdfGenerating] = useState(false);
-  const [processTemplateDownloading, setProcessTemplateDownloading] = useState(false);
+  const [testItemsWordDownloading, setTestItemsWordDownloading] = useState(false);
+  const [pdfAutomationBusy, setPdfAutomationBusy] = useState(false);
   const [salespersons, setSalespersons] = useState([]);
   const [salesUserId, setSalesUserId] = useState('');
   const [salesName, setSalesName] = useState('');
@@ -308,12 +320,12 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [requestLoading, setRequestLoading] = useState(Boolean(requestId));
   const [submittedRequest, setSubmittedRequest] = useState(null);
   const [approvedRequest, setApprovedRequest] = useState(null);
-  const [approvedPdfGenerating, setApprovedPdfGenerating] = useState(false);
   const [requestMeta, setRequestMeta] = useState(null);
   const isModificationMode = workflowMode === 'change' || (workflowMode === 'edit' && requestMeta?.requestType === 'modification');
   const isAdditionalTestMode = workflowMode === 'additionalTest' || (workflowMode === 'edit' && requestMeta?.requestType === 'additional_test');
   const isReviewingAdditionalTest = workflowMode === 'review' && requestMeta?.requestType === 'additional_test';
   const isAdditionalTestWorkflow = isAdditionalTestMode || isReviewingAdditionalTest;
+  const areAttachmentsReadOnly = workflowMode === 'additionalTest' || requestMeta?.requestType === 'additional_test';
   const isSalesRequestMode = ['request', 'edit', 'change', 'additionalTest'].includes(workflowMode);
   const [businessTestItemsSnapshot, setBusinessTestItemsSnapshot] = useState([]);
   const [requestAttachments, setRequestAttachments] = useState([]);
@@ -530,7 +542,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           reviewNote: data.review_note,
           version: data.version,
           requestType: data.request_type || 'normal',
-          parentRequestId: data.parent_request_id || null
+          parentRequestId: data.parent_request_id || null,
+          rootRequestId: data.root_request_id || null,
+          relatedRequestIds: Array.isArray(data.related_request_ids) ? data.related_request_ids : []
         });
       })
       .catch(error => alert(error.response?.data?.message || '申请内容加载失败'))
@@ -627,13 +641,32 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   useEffect(() => {
     if (!requestId) return;
     let active = true;
-    getOrderRequestFiles(requestId)
-      .then(({ data }) => active && setRequestAttachments(Array.isArray(data) ? data : []))
+    const attachmentRequestIds = areAttachmentsReadOnly
+      ? [...new Set([
+          requestMeta?.rootRequestId,
+          requestMeta?.parentRequestId,
+          requestId,
+          ...(requestMeta?.relatedRequestIds || [])
+        ].filter(Boolean))]
+      : [requestId];
+    Promise.all(attachmentRequestIds.map(async (attachmentRequestId) => {
+      try {
+        const { data } = await getOrderRequestFiles(attachmentRequestId);
+        return (Array.isArray(data) ? data : []).map((attachment) => ({
+          ...attachment,
+          ownerRequestId: attachmentRequestId
+        }));
+      } catch (error) {
+        console.error('申请附件加载失败:', error);
+        return [];
+      }
+    }))
+      .then((groups) => active && setRequestAttachments(groups.flat()))
       .catch((error) => {
         if (active) console.error('申请附件加载失败:', error);
       });
     return () => { active = false };
-  }, [requestId]);
+  }, [requestId, areAttachmentsReadOnly, requestMeta?.rootRequestId, requestMeta?.parentRequestId, requestMeta?.relatedRequestIds]);
 
   const moveTestItem = (from, to) => {
     if (from === to || from == null || to == null) return;
@@ -1222,69 +1255,18 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const downloadFile = (url, filename) => { const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); };
 
-  const handleProcessTemplateDownload = async (flowData, fallbackFileName) => {
-    if (!flowData || processTemplateDownloading) return;
-    setProcessTemplateDownloading(true);
+  const handleTestItemsWordDownload = async () => {
+    if (!requestId || testItemsWordDownloading) return;
+    setTestItemsWordDownloading(true);
     try {
-      const response = await generateProcessTemplate(flowData);
+      const response = await downloadOrderRequestTestItemsWord(requestId);
       const url = URL.createObjectURL(new Blob([response.data], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
-      downloadFile(url, fallbackFileName || `${flowData.order_num || '流转单'}.docx`);
+      downloadFile(url, `${requestMeta?.requestNo || '业务申请'}-检测项目.docx`);
       URL.revokeObjectURL(url);
     } catch (error) {
-      alert(error.response?.data?.message || error.response?.data?.error || '流转单生成失败，请重试');
+      alert(error.response?.data?.message || '业务检测项目 Word 导出失败，请重试');
     } finally {
-      setProcessTemplateDownloading(false);
-    }
-  };
-
-  const handleDirectPdfGenerate = async () => {
-    if (!directCreatedOrder || directPdfGenerating) return;
-    setDirectPdfGenerating(true);
-    try {
-      const response = await generateDirectOrderPdf(directCreatedOrder.orderNum, directCreatedOrder.templateData);
-      const url = URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-      const filename = `${directCreatedOrder.orderNum}-${directCreatedOrder.customerName}-${directCreatedOrder.contactName}.pdf`;
-      setDirectCreatedOrder(prev => {
-        if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
-        return prev ? { ...prev, pdfUrl: url, pdfFilename: filename } : prev;
-      });
-      downloadFile(url, filename);
-    } catch (error) {
-      alert(error.response?.data?.message || 'PDF 生成失败，请重试');
-    } finally {
-      setDirectPdfGenerating(false);
-    }
-  };
-
-  const handleApprovedPdfGenerate = async () => {
-    if (!approvedRequest || approvedPdfGenerating) return;
-    setApprovedPdfGenerating(true);
-    try {
-      const { data } = await generateOrderRequestPdf(approvedRequest.requestId);
-      setApprovedRequest(prev => prev ? {
-        ...prev,
-        pdfReady: true,
-        pdfFilename: data.filename || prev.pdfFilename,
-        generatedMessage: data.already_generated
-          ? 'PDF 已生成，业务员和开单员均可下载。'
-          : 'PDF 生成完成，业务员和开单员现均可下载。'
-      } : prev);
-    } catch (error) {
-      alert(error.response?.data?.message || 'PDF 生成失败，请重试');
-    } finally {
-      setApprovedPdfGenerating(false);
-    }
-  };
-
-  const handleApprovedPdfDownload = async () => {
-    if (!approvedRequest) return;
-    try {
-      const response = await downloadOrderRequestAttachment(approvedRequest.requestId);
-      const url = URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-      downloadFile(url, approvedRequest.pdfFilename || `${approvedRequest.orderNum || '委托单'}.pdf`);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      alert(error.response?.data?.message || 'PDF 下载失败');
+      setTestItemsWordDownloading(false);
     }
   };
 
@@ -1329,8 +1311,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     const rejected = [];
     files.forEach((file, index) => {
       const isSupportedImage = /^image\/(png|jpeg)$/i.test(file.type) || /\.(png|jpe?g)$/i.test(file.name);
-      if (file.size > 20 * 1024 * 1024) rejected.push(`${file.name}（超过20MB）`);
-      else if (kind === 'request_image' && !isSupportedImage) rejected.push(`${file.name}（仅支持PNG/JPG）`);
+      if (kind === 'request_image' && !isSupportedImage) rejected.push(`${file.name}（仅支持PNG/JPG）`);
       else accepted.push({ localId: `${Date.now()}-${index}-${file.name}`, file, kind });
     });
     if (rejected.length) alert(`以下文件未加入：\n${rejected.join('\n')}`);
@@ -1362,7 +1343,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     if (!requestId || attachmentActionId) return;
     setAttachmentActionId(`download-${attachment.file_id}`);
     try {
-      const response = await downloadOrderRequestFile(requestId, attachment.file_id);
+      const response = await downloadOrderRequestFile(attachment.ownerRequestId || requestId, attachment.file_id);
       const url = URL.createObjectURL(new Blob([response.data], { type: attachment.mime_type || 'application/octet-stream' }));
       downloadFile(url, attachment.original_filename);
       URL.revokeObjectURL(url);
@@ -1621,7 +1602,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       templateData: requestTemplateData,
       formSnapshot: {
         formData: isAdditionalTestWorkflow ? { ...formData, testItems: effectiveTestItems } : formData,
-        businessTestItems: isSalesRequestMode ? effectiveTestItems : businessTestItemsSnapshot,
+        businessTestItems: (isSalesRequestMode || workflowMode === 'direct') ? effectiveTestItems : businessTestItemsSnapshot,
         selectedCustomer,
         selectedPayer,
         isTransferMode,
@@ -1693,29 +1674,35 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     }
 
     if (workflowMode === 'review') {
+      let openedOrderNum = '';
+      setPdfAutomationBusy(true);
       try {
         const response = await openOrderRequest(requestId, requestPacket, requestMeta?.version);
-        const openedOrderNum = response.data.orderNum;
-        const flowCommissionData = Array.isArray(response.data.flowTestItems) && response.data.flowTestItems.length
-          ? { ...commissionData, testItems: response.data.flowTestItems }
-          : commissionData;
+        openedOrderNum = response.data.orderNum;
+        await generateOrderRequestPdf(requestId);
         setApprovedRequest({
           requestId,
           orderNum: openedOrderNum,
-          pdfReady: false,
-          flowData: buildProcessTemplateData(flowCommissionData, openedOrderNum, selectedCustomer),
-          processTemplateFileName: `${openedOrderNum}-${selectedCustomer.customer_name}-${selectedCustomer.contact_name}.docx`,
-          generatedMessage: '正式委托单已录入 LIMS，可现在生成 PDF，或稍后在申请队列中生成。'
+          generatedMessage: '委托单已新增，PDF 已自动生成并关联到 LIMS。'
         });
       } catch (error) {
-        alert(error.response?.data?.message || '开单失败，请重试');
+        const message = error.response?.data?.message || 'PDF 自动生成失败';
+        if (openedOrderNum) {
+          setApprovedRequest({ requestId, orderNum: openedOrderNum, generatedMessage: `委托单已新增，但 PDF 自动生成失败：${message}` });
+        } else {
+          alert(message || '开单失败，请重试');
+        }
+      } finally {
+        setPdfAutomationBusy(false);
       }
       return;
     }
 
+    let createdOrderNum = '';
+    setPdfAutomationBusy(true);
     try {
-      const response = await createCommission(commissionData);
-      alert(`表单提交成功！委托单号为: ${response.data.orderNum}`);
+      const response = await createCommission({ ...commissionData, directRequestPayload: requestPacket });
+      createdOrderNum = response.data.orderNum;
       const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
       const templateData = {
         ...buildOrderUrgencySymbols(commissionData.orderInfo.order_urgency_type),
@@ -1829,6 +1816,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
       const flowData = {
         order_num: response.data.orderNum,
+        commissioner_name: (selectedCustomer.customer_name || ''),
+        contact_name: (selectedCustomer.contact_name || ''),
         customer_name: (selectedCustomer.customer_name || ''),
         customer_contactName: (selectedCustomer.contact_name || ''),
         machiningCenterSymbol: machiningItems.length > 0 ? '☑' : '☐',
@@ -1883,20 +1872,25 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       const orderNum = response.data.orderNum;
       const custName = selectedCustomer.customer_name;
       const contactName = selectedCustomer.contact_name;
+      await generateDirectOrderPdf(orderNum, templateData);
       setDirectCreatedOrder({
         orderNum,
         customerName: custName,
         contactName,
-        templateData,
-        flowData,
-        processTemplateFileName: `${orderNum}-${custName}-${contactName}.docx`,
-        pdfUrl: '',
-        pdfFilename: ''
+        generatedMessage: '委托单已新增，PDF 已自动生成并关联到 LIMS。'
       });
       setShowDownloadModal(true);
     } catch (error) {
-      const msg = error.response?.data?.message || '服务器出现错误，请重试';
-      alert(msg); console.error('Creating commission Error:', error);
+      const msg = await apiErrorMessage(error, '服务器出现错误，请重试');
+      if (createdOrderNum) {
+        setDirectCreatedOrder({ orderNum: createdOrderNum, generatedMessage: `委托单已新增，但 PDF 自动生成失败：${msg}` });
+        setShowDownloadModal(true);
+      } else {
+        alert(msg);
+      }
+      console.error('Creating commission Error:', error);
+    } finally {
+      setPdfAutomationBusy(false);
     }
   };
 
@@ -2439,17 +2433,24 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
         {(workflowMode === 'review' || workflowMode === 'view') && businessTestItemsSnapshot.length > 0 && (
           <section className="business-test-snapshot">
-            <h3>业务申请检测项目</h3>
+            <div className="business-test-snapshot-heading">
+              <h3>业务申请检测项目</h3>
+              {workflowMode === 'review' && (
+                <button type="button" onClick={handleTestItemsWordDownload} disabled={testItemsWordDownloading}>
+                  {testItemsWordDownloading ? '导出中…' : 'Word版导出'}
+                </button>
+              )}
+            </div>
             <p>以下内容为业务提交时的原始填写，仅供开单录入参考。</p>
             <div className="test-item-table-wrapper business-snapshot-scroll">
               <table className="business-snapshot-table">
                 <thead>
                   <tr>
                     <th>序号</th>
-                    <th>样品名称</th>
-                    <th>材质</th>
+                    <th className="sample-wide-col">样品名称</th>
+                    <th className="sample-wide-col">材质</th>
                     <th>样品类型</th>
-                    <th>样品原号</th>
+                    <th className="sample-wide-col">样品原号</th>
                     <th>检测项目</th>
                     <th>检测标准</th>
                     <th>样品到达方式</th>
@@ -2469,10 +2470,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     return (
                       <tr key={index}>
                         <td>{index + 1}</td>
-                        <td>{item.sampleName || '—'}</td>
-                        <td>{item.material || '—'}</td>
+                        <td className="sample-wide-col">{item.sampleName || '—'}</td>
+                        <td className="sample-wide-col">{item.material || '—'}</td>
                         <td>{sampleTypeText}</td>
-                        <td>{item.original_no || '—'}</td>
+                        <td className="sample-wide-col">{item.original_no || '—'}</td>
                         <td>{item.test_item || '—'}</td>
                         <td>{item.test_method || '—'}</td>
                         <td>{item.arrival_mode === 'on_site' ? '现场到达' : ['mail', 'delivery'].includes(item.arrival_mode) ? '寄样' : '—'}</td>
@@ -2497,10 +2498,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 <thead>
                   <tr>
                     <th className="num">序号</th>
-                    <th>样品名称<span style={{ color: 'red' }}>*</span></th>
-                    <th>材质<span style={{ color: 'red' }}>*</span></th>
+                    <th className="sample-wide-col">样品名称<span style={{ color: 'red' }}>*</span></th>
+                    <th className="sample-wide-col">材质<span style={{ color: 'red' }}>*</span></th>
                     <th>样品类型<span style={{ color: 'red' }}>*</span></th>
-                    <th>样品原号</th>
+                    <th className="sample-wide-col">样品原号</th>
                     <th className="business-test-name-col">检测项目<span style={{ color: 'red' }}>*</span></th>
                     <th>检测标准<span style={{ color: 'red' }}>*</span></th>
                     <th className="business-choice-col">样品到达方式</th>
@@ -2521,10 +2522,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     return (
                       <tr key={index} className={item._locked ? 'locked-test-item-row' : (isModificationMode ? 'modification-test-item-row' : (isAdditionalTestMode ? 'additional-new-test-row' : ''))}>
                         <td className="num">{index + 1}</td>
-                        <td><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
-                        <td><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
+                        <td className="sample-wide-col"><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
+                        <td className="sample-wide-col"><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
                         <td><input type="text" value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
-                        <td><input type="text" value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
+                        <td className="sample-wide-col"><input type="text" value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
                         <td><input type="text" value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
                         <td><input type="text" value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
                         <td className="business-choice-cell">
@@ -2587,10 +2588,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <thead>
               <tr>
                 <th className="num">序号</th>
-                <th>样品名称<span style={{ color: 'red' }}>*</span><br/>Sample Name</th>
-                <th>材质<span style={{ color: 'red' }}>*</span><br/>Material</th>
+                <th className="sample-wide-col">样品名称<span style={{ color: 'red' }}>*</span><br/>Sample Name</th>
+                <th className="sample-wide-col">材质<span style={{ color: 'red' }}>*</span><br/>Material</th>
                 <th>样品状态<span style={{ color: 'red' }}>*</span><br/>Sample Status</th>
-                <th>样品原号<br/>Sample No.</th>
+                <th className="sample-wide-col">样品原号<br/>Sample No.</th>
                 <th>业务报价<span style={{ color: 'red' }}>*</span><br/>Business Quote</th>
                 <th>单位<span style={{ color: 'red' }}>*</span><br/>Unit</th>
                 <th>折扣<span style={{ color: 'red' }}>*</span><br/>Discount(%)</th>
@@ -2600,7 +2601,6 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 <th>是否到达<br/>Arrived</th>
                 {workflowMode !== 'request' && <th>流转顺序<br/>Seq No</th>}
                 <th>加急类型<br/>Service Urgency</th>
-                {workflowMode === 'direct' && <th>制样<br/>Sample preparation</th>}
                 {workflowMode !== 'direct' && workflowMode !== 'review' && <th className="flow-note-col">流转备注<br/>Flow note</th>}
                 <th>数量<span style={{ color: 'red' }}>*</span><br/>Qty</th>
                 <th>所属部门<span style={{ color: 'red' }}>*</span></th>
@@ -2615,8 +2615,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     <span className="drag-handle" title={item._locked ? '原项目不可调整' : '按住拖动以调整顺序'} draggable={!item._locked} onDragStart={(e) => onHandleDragStart(e, index)} style={{ display:'inline-block', cursor:item._locked ? 'default' : 'grab', marginRight: 6, userSelect:'none' }}>⠿</span>
                     {index + 1}
                   </td>
-                  <td><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
-                  <td><input type="text" value={item.material} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
+                  <td className="sample-wide-col"><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
+                  <td className="sample-wide-col"><input type="text" value={item.material} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
                   <td>
                     {String(item.sampleType) === '5' ? (
                       <input type="text" placeholder="请输入" value={item.sampleTypeCustom || ''} onChange={e => handleTestItemChange(index, 'sampleTypeCustom', e.target.value)} />
@@ -2627,7 +2627,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                       </select>
                     )}
                   </td>
-                  <td><input type="text" value={item.original_no} onChange={(e) => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
+                  <td className="sample-wide-col"><input type="text" value={item.original_no} onChange={(e) => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
                   <td>
                     <input 
                       type="text" 
@@ -2741,13 +2741,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                       ))}
                     </select>
                   </td>
-                  {workflowMode === 'direct' ? <td>
-                    <select value={item.sample_preparation != null ? String(item.sample_preparation) : ''} onChange={e => handleTestItemChange(index, 'sample_preparation', e.target.value === '' ? '' : Number(e.target.value))}>
-                      <option value="">--请选择--</option>
-                      <option value="1">是 Yes</option>
-                      <option value="0">否 No</option>
-                    </select>
-                  </td> : workflowMode !== 'review' && <td className="flow-note-col"><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} placeholder="填写流转、前处理或顺序要求" /></td>}
+                  {workflowMode !== 'direct' && workflowMode !== 'review' && <td className="flow-note-col"><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} placeholder="填写流转、前处理或顺序要求" /></td>}
                   <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => String(dept.department_id) === String(item.department_id))?.department_name || '未知部门'}</span></td>
@@ -2799,7 +2793,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               <aside className="request-attachments-panel">
                 <div className="request-attachments-heading">
                   <strong>附件</strong>
-                  <span>单个文件不超过 20MB</span>
+                  <span>文件大小不限</span>
                 </div>
                 {[
                   { kind: 'request_image', title: '附件图片', hint: 'PNG/JPG，生成PDF时每张图片单独一页', accept: 'image/png,image/jpeg,.png,.jpg,.jpeg' },
@@ -2828,13 +2822,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                               </a>
                               <span>{formatAttachmentSize(attachment.file_size)}</span>
                             </div>
-                            {attachment.can_delete && ['edit', 'review'].includes(workflowMode) && (
+                            {!areAttachmentsReadOnly && attachment.can_delete && ['edit', 'review'].includes(workflowMode) && (
                               <button type="button" className="request-attachment-remove" aria-label={`删除附件 ${attachment.original_filename}`} title="删除" onClick={() => handleAttachmentDelete(attachment)} disabled={Boolean(attachmentActionId)}>❌</button>
                             )}
                           </div>
                         ))}
                       </div>
-                      {isSalesRequestMode && (
+                      {isSalesRequestMode && !areAttachmentsReadOnly && (
                         <label className="request-attachment-upload">
                           <input type="file" multiple accept={group.accept} onChange={(event) => handleAttachmentSelect(event, group.kind)} />
                           <span>＋ 上传{group.title}</span>
@@ -2845,6 +2839,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 })}
                 {requestMeta?.status === 'approved' && (
                   <small>测试需求单在 LIMS 中管理；附件图片随委托单 PDF 查看。</small>
+                )}
+                {areAttachmentsReadOnly && (
+                  <small>加测申请同步展示原申请附件，仅支持查看和下载。</small>
                 )}
               </aside>
             )}
@@ -2930,7 +2927,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                   </span>
                 )}
               </div>
-              {isSalesRequestMode && !isReadOnly && selectedCustomer && ['missing', 'ready'].includes(commissionerSignatureStatus) && (
+              {(isSalesRequestMode || workflowMode === 'direct') && !isReadOnly && selectedCustomer && ['missing', 'ready'].includes(commissionerSignatureStatus) && (
                 <div className="commissioner-signature-actions">
                   <button type="button" className="commissioner-signature-upload" onClick={() => commissionerSignatureInputRef.current?.click()} disabled={commissionerSignatureUploading}>
                     {commissionerSignatureUploading ? '处理中…' : commissionerSignatureStatus === 'ready' ? '重新上传' : '上传签名'}
@@ -3139,20 +3136,24 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         </fieldset>
       </form>
 
+      {pdfAutomationBusy && (
+        <div className="modal workflow-success-modal pdf-automation-modal">
+          <div className="modal-content">
+            <div className="pdf-automation-spinner" aria-hidden="true" />
+            <h2>正在生成PDF中，请勿退出</h2>
+            <p className="success-hint">系统正在完成委托单录入、PDF 生成和 LIMS 附件关联。</p>
+          </div>
+        </div>
+      )}
       {showDownloadModal && (
         <div className="modal workflow-success-modal">
           <div className="modal-content">
             <div className="success-check">✓</div>
-            <h2>开单成功</h2>
+            <h2>委托单已新增</h2>
             <p>正式委托单号：<strong>{directCreatedOrder?.orderNum}</strong></p>
-            <p className="success-hint">{directPdfGenerating ? '生成中，约需 8–10 秒，请勿刷新。' : '可生成委托单 PDF，或下载流转单。'}</p>
+            <p className="success-hint">{directCreatedOrder?.generatedMessage}</p>
             <div className='decide-button review-success-actions'>
-              {directCreatedOrder?.pdfUrl
-                ? <button type="button" className="pdf-download-action" onClick={() => downloadFile(directCreatedOrder.pdfUrl, directCreatedOrder.pdfFilename)}>下载PDF</button>
-                : <button type="button" className="pdf-generate-action" onClick={handleDirectPdfGenerate} disabled={directPdfGenerating}>{directPdfGenerating ? '生成中…' : '生成PDF'}</button>}
-              <button type="button" onClick={() => handleProcessTemplateDownload(directCreatedOrder?.flowData, directCreatedOrder?.processTemplateFileName)} disabled={processTemplateDownloading}>{processTemplateDownloading ? '生成中…' : '下载流转单'}</button>
               <button type="button" className="secondary" onClick={() => {
-                if (directCreatedOrder?.pdfUrl) URL.revokeObjectURL(directCreatedOrder.pdfUrl);
                 setShowDownloadModal(false);
                 setDirectCreatedOrder(null);
                 navigate('/');
@@ -3178,14 +3179,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         <div className="modal workflow-success-modal">
           <div className="modal-content">
             <div className="success-check">✓</div>
-            <h2>开单成功</h2>
+            <h2>委托单已新增</h2>
             <p>正式委托单号：<strong>{approvedRequest.orderNum}</strong></p>
-            <p className="success-hint">{approvedPdfGenerating ? '生成中，约需 8–10 秒，请勿刷新。' : approvedRequest.generatedMessage}</p>
+            <p className="success-hint">{approvedRequest.generatedMessage}</p>
             <div className="decide-button review-success-actions">
-              {approvedRequest.pdfReady
-                ? <button type="button" className="pdf-download-action" onClick={handleApprovedPdfDownload}>下载PDF</button>
-                : <button type="button" className="pdf-generate-action" onClick={handleApprovedPdfGenerate} disabled={approvedPdfGenerating}>{approvedPdfGenerating ? '生成中…' : '生成PDF'}</button>}
-              <button type="button" onClick={() => handleProcessTemplateDownload(approvedRequest.flowData, approvedRequest.processTemplateFileName)} disabled={processTemplateDownloading}>{processTemplateDownloading ? '生成中…' : '下载流转单'}</button>
               <button type="button" className="secondary" onClick={() => navigate('/')}>关闭</button>
             </div>
           </div>

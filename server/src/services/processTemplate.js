@@ -7,6 +7,18 @@ function includes(values, value) {
   return Array.isArray(values) && values.includes(value);
 }
 
+function resolveFlowUrgency(packet, items) {
+  const urgencyRank = { normal: 0, urgent_1_5x: 1, urgent_2x: 2 };
+  const candidates = [
+    packet?.commissionData?.orderInfo?.order_urgency_type,
+    packet?.formSnapshot?.formData?.orderUrgencyType,
+    ...(Array.isArray(items) ? items.map((item) => item?.service_urgency) : [])
+  ];
+  return candidates.reduce((selected, value) => (
+    urgencyRank[value] > urgencyRank[selected] ? value : selected
+  ), 'normal');
+}
+
 function buildProcessTemplateData(packet = {}, orderNum, testItems = [], now = new Date()) {
   const commission = packet.commissionData || {};
   const order = commission.orderInfo || {};
@@ -42,9 +54,21 @@ function buildProcessTemplateData(packet = {}, orderNum, testItems = [], now = n
   const reportSeals = Array.isArray(order.report_seals) ? order.report_seals : [];
   const hazards = Array.isArray(requirements.hazards) ? requirements.hazards : [];
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const urgency = order.order_urgency_type || 'normal';
+  // 流转单使用委托单周期和各检测项目中的最高加急级别，兼容历史快照字段。
+  const urgency = resolveFlowUrgency(packet, items);
+  const urgencySymbols = {
+    orderUrgencyNormalSymbol: urgency === 'normal' ? '☑' : '☐',
+    orderUrgency15Symbol: urgency === 'urgent_1_5x' ? '☑' : '☐',
+    orderUrgency2Symbol: urgency === 'urgent_2x' ? '☑' : '☐',
+    // process_template.docx 使用这组历史字段名。
+    serviceType1Symbol: urgency === 'normal' ? '☑' : '☐',
+    serviceType2Symbol: urgency === 'urgent_1_5x' ? '☑' : '☐',
+    serviceType3Symbol: urgency === 'urgent_2x' ? '☑' : '☐'
+  };
   return {
     order_num: orderNum,
+    commissioner_name: customer.customer_name || '',
+    contact_name: customer.contact_name || '',
     customer_name: customer.customer_name || '',
     customer_contactName: customer.contact_name || '',
     machiningCenterSymbol: buckets.machiningItems.length ? '☑' : '☐',
@@ -66,9 +90,7 @@ function buildProcessTemplateData(packet = {}, orderNum, testItems = [], now = n
     headerType1Symbol: String(report.header_type || '') === '1' ? '☑' : '☐',
     headerType2Symbol: String(report.header_type || '') === '2' ? '☑' : '☐',
     header_additional_info: report.header_other || '',
-    orderUrgencyNormalSymbol: urgency === 'normal' ? '☑' : '☐',
-    orderUrgency15Symbol: urgency === 'urgent_1_5x' ? '☑' : '☐',
-    orderUrgency2Symbol: urgency === 'urgent_2x' ? '☑' : '☐',
+    ...urgencySymbols,
     delivery_days_after_receipt: order.delivery_days_after_receipt || '',
     returnNoSymbol: String(handling.handling_type || '') === '1' ? '☑' : '☐',
     returnPickupSymbol: String(handling.handling_type || '') === '2' ? '☑' : '☐',
@@ -100,10 +122,12 @@ async function generateProcessTemplateBuffer(flowData) {
   const templatePath = path.resolve(__dirname, '..', '..', 'templates', 'process_template.docx');
   const templateBuffer = await fs.readFile(templatePath);
   if (!templateBuffer.length) throw new Error('流转单模板文件为空');
-  const doc = new Docxtemplater(new PizZip(templateBuffer));
-  doc.setData(flowData);
-  doc.render();
+  const doc = new Docxtemplater(new PizZip(templateBuffer), {
+    paragraphLoop: true,
+    linebreaks: true
+  });
+  doc.render(flowData);
   return doc.getZip().generate({ type: 'nodebuffer' });
 }
 
-module.exports = { buildProcessTemplateData, generateProcessTemplateBuffer };
+module.exports = { buildProcessTemplateData, generateProcessTemplateBuffer, resolveFlowUrgency };

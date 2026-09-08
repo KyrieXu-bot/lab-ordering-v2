@@ -42,6 +42,13 @@ function requireSales(req, res, next) {
   next();
 }
 
+function requireSalesOrReviewer(req, res, next) {
+  if (!isSales(req.user) && !isReviewer(req.user)) {
+    return res.status(403).json({ message: '仅业务员或开单审核员可执行此操作' });
+  }
+  next();
+}
+
 function restrictNonRequestWrites(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   if (req.path.startsWith('/order-requests')) return next();
@@ -49,4 +56,4 @@ function restrictNonRequestWrites(req, res, next) {
   return requireReviewer(req, res, next);
 }
 
-module.exports = { requireAuth, requireReviewer, requireSales, restrictNonRequestWrites, isReviewer, isSales, REVIEWER_IDS };
+module.exports = { requireAuth, requireReviewer, requireSales, requireSalesOrReviewer, restrictNonRequestWrites, isReviewer, isSales, REVIEWER_IDS };

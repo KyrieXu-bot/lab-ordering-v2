@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const fs = require('fs').promises;
 const pool = require('../db');
-const { requireSales } = require('../middleware/auth');
+const { requireSalesOrReviewer } = require('../middleware/auth');
 const {
   commissionerSignaturesDirectory,
   normalizeCommissionerId,
@@ -48,7 +48,7 @@ router.get('/:commissionerId', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/:commissionerId', requireSales, receiveSignature, async (req, res, next) => {
+router.post('/:commissionerId', requireSalesOrReviewer, receiveSignature, async (req, res, next) => {
   try {
     const commissionerId = normalizeCommissionerId(req.params.commissionerId);
     if (!commissionerId) return res.status(400).json({ message: '委托方ID不正确' });
@@ -68,7 +68,7 @@ router.post('/:commissionerId', requireSales, receiveSignature, async (req, res,
   } catch (error) { next(error); }
 });
 
-router.delete('/:commissionerId', requireSales, async (req, res, next) => {
+router.delete('/:commissionerId', requireSalesOrReviewer, async (req, res, next) => {
   try {
     const commissionerId = normalizeCommissionerId(req.params.commissionerId);
     if (!commissionerId) return res.status(400).json({ message: '委托方ID不正确' });

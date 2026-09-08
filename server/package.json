@@ -8,6 +8,7 @@
     "start": "npm run start:prod",
     "start:local": "node -r dotenv/config src/index.js dotenv_config_path=.env.local",
     "start:prod": "node -r dotenv/config src/index.js dotenv_config_path=.env.prod",
+    "start:pdf-worker": "node -r dotenv/config scripts/start-pdf-conversion-worker.js dotenv_config_path=.env.pdf-worker",
     "test": "node --test"
   },
   "dependencies": {

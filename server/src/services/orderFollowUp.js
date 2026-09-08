@@ -166,7 +166,7 @@ async function getOrderTestItemsForFlow(conn, orderId) {
     `SELECT ti.test_item_id, ti.sample_name, ti.material, ti.sample_type, ti.original_no,
             CONCAT_WS(' - ', NULLIF(ti.category_name, ''), NULLIF(ti.detail_name, '')) AS test_item,
             ti.standard_code AS test_method, ti.quantity, ti.department_id, ti.note,
-            ti.test_code, ti.seq_no, ti.is_add_on
+            ti.test_code, ti.seq_no, ti.service_urgency, ti.is_add_on
      FROM test_items ti
      WHERE ti.order_id = ?
      ORDER BY ti.test_item_id`,

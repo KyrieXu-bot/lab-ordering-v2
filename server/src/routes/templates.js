@@ -1,4 +1,5 @@
 const express = require('express');
+const pool = require('../db');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { generateProcessTemplateBuffer } = require('../services/processTemplate');
 
@@ -40,10 +41,18 @@ router.post('/generate-process-template', async (req, res) => {
     const report = await generateProcessTemplateBuffer(flowData);
     console.log('流转单文档生成成功，大小:', report.length);
 
-    // 设置响应头（命名：委托单号+客户名称+委托联系人名称）
+    const [[commissioner]] = await pool.query(
+      `SELECT m.commissioner_name, m.contact_name
+       FROM orders o
+       LEFT JOIN commissioners m ON m.commissioner_id = o.commissioner_id
+       WHERE o.order_id = ? LIMIT 1`,
+      [flowData.order_num]
+    );
+
+    // 设置响应头（命名：委托单号-委托方名称-委托联系人名称）
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     const safe = (s) => (typeof s === 'string' ? s.trim() : '');
-    const fileName = `${safe(flowData.order_num)}-${safe(flowData.customer_name)}-${safe(flowData.customer_contactName)}.docx`;
+    const fileName = `${safe(flowData.order_num)}-${safe(commissioner?.commissioner_name || flowData.commissioner_name || flowData.customer_name)}-${safe(commissioner?.contact_name || flowData.contact_name || flowData.customer_contactName)}.docx`;
     const encodedFileName = encodeURIComponent(fileName);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`);
     

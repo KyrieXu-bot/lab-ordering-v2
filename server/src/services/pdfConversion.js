@@ -21,6 +21,11 @@ async function exists(filePath) {
   try { await fs.access(filePath); return true; } catch (_) { return false; }
 }
 
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 async function findSoffice() {
   const candidates = [
     process.env.SOFFICE_PATH,
@@ -58,7 +63,7 @@ async function convertWithLibreOffice(inputPath, outputPath) {
   }
 }
 
-async function convertWithWord(inputPath, outputPath) {
+async function convertWithWord(inputPath, outputPath, options = {}) {
   if (process.platform !== 'win32' || process.env.DISABLE_WORD_PDF === '1') return false;
   const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'convert-docx-to-pdf.ps1');
   await run('powershell.exe', [
@@ -66,13 +71,64 @@ async function convertWithWord(inputPath, outputPath) {
     '-File', scriptPath,
     '-InputPath', inputPath,
     '-OutputPath', outputPath
-  ]);
+  ], { timeout: options.timeoutMs });
   return exists(outputPath);
+}
+
+async function convertWithRemoteService(inputPath, outputPath) {
+  const serviceUrl = String(process.env.PDF_CONVERSION_SERVICE_URL || '').trim();
+  if (!serviceUrl) return false;
+
+  const apiKey = String(process.env.PDF_CONVERSION_SERVICE_KEY || '').trim();
+  if (!apiKey) throw new Error('已配置 PDF_CONVERSION_SERVICE_URL，但缺少 PDF_CONVERSION_SERVICE_KEY');
+
+  const timeoutMs = parsePositiveInteger(process.env.PDF_CONVERSION_SERVICE_TIMEOUT_MS, 120000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const source = await fs.readFile(inputPath);
+    const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/convert`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'x-file-name': encodeURIComponent(path.basename(inputPath))
+      },
+      body: source,
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const details = (await response.text()).slice(0, 1000);
+      throw new Error(`远程 Word 转换服务返回 ${response.status}: ${details || response.statusText}`);
+    }
+    const pdfBuffer = Buffer.from(await response.arrayBuffer());
+    if (pdfBuffer.length < 5 || pdfBuffer.subarray(0, 5).toString() !== '%PDF-') {
+      throw new Error('远程 Word 转换服务返回的内容不是有效 PDF');
+    }
+    await fs.writeFile(outputPath, pdfBuffer);
+    return true;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error(`远程 Word 转换服务超时（${timeoutMs}ms）`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function convertDocxToPdf(inputPath, outputPath) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   const failures = [];
+  try {
+    if (await convertWithRemoteService(inputPath, outputPath)) return { engine: 'remote-microsoft-word' };
+  } catch (error) {
+    failures.push(error.message);
+    if (process.env.PDF_CONVERSION_REMOTE_REQUIRED === '1') {
+      throw Object.assign(new Error(`Windows PDF 转换节点不可用：${error.message}`), {
+        code: 'PDF_REMOTE_ENGINE_UNAVAILABLE',
+        status: 503
+      });
+    }
+  }
   try {
     if (await convertWithLibreOffice(inputPath, outputPath)) return { engine: 'libreoffice' };
   } catch (error) { failures.push(error.message); }
@@ -85,4 +141,4 @@ async function convertDocxToPdf(inputPath, outputPath) {
   );
 }
 
-module.exports = { convertDocxToPdf };
+module.exports = { convertDocxToPdf, convertWithRemoteService, convertWithWord };

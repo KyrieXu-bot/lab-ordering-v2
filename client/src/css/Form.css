@@ -618,6 +618,9 @@ body {
 .workflow-success-modal .decide-button { justify-content: center; }
 .workflow-success-modal button.secondary { background: #7a8580; }
 .workflow-success-modal .review-success-actions { align-items: center; gap: 28px; }
+.pdf-automation-modal .modal-content { pointer-events: none; }
+.pdf-automation-spinner { width: 54px; height: 54px; margin: 0 auto 20px; border: 5px solid #e7ece9; border-top-color: #3f6b55; border-radius: 50%; animation: pdf-automation-spin .85s linear infinite; }
+@keyframes pdf-automation-spin { to { transform: rotate(360deg); } }
 .workflow-success-modal .pdf-generate-action { background:#b66b2f; color:#fff; font-weight:700; box-shadow:0 5px 14px rgba(166,91,36,.24); }
 .workflow-success-modal .pdf-generate-action:hover:not(:disabled) { background:#985522; transform:translateY(-1px); }
 .workflow-success-modal .pdf-generate-action:disabled { opacity:.7; cursor:wait; }
@@ -881,7 +884,9 @@ button:hover {
     border-radius: 12px;
     background: #f3f7f5;
 }
-.business-test-snapshot h3 { margin-top: 0; }
+.business-test-snapshot h3 { margin: 0; }
+.business-test-snapshot-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }
+.business-test-snapshot-heading button { flex:0 0 auto; background:#3f6b55; color:#fff; border-color:#3f6b55; font-weight:700; }
 .business-test-snapshot > p { margin: -4px 0 10px; color: #6f7b75; font-size: 13px; }
 .business-test-snapshot .test-item-table-wrapper { margin-bottom: 0; }
 .business-snapshot-table { min-width: 1445px; background: #fff; }
@@ -1530,4 +1535,19 @@ button:hover {
         display: none;
         /* 隐藏序号列 */
     }
+}
+
+/* 样品名称、材质和样品原号采用折中的固定宽度，兼顾录入与横向浏览。 */
+.workflow-form-page .test-item-table-wrapper {
+    overflow-x: auto;
+}
+.workflow-form-page .sample-wide-col {
+    box-sizing: border-box;
+    width: 150px !important;
+    min-width: 150px !important;
+}
+.workflow-form-page .sample-wide-col input[type="text"] {
+    box-sizing: border-box;
+    width: 100% !important;
+    min-width: 135px !important;
 }

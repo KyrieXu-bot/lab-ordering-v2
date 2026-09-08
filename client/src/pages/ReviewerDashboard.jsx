@@ -4,7 +4,6 @@ import { approveOrderRequest, generateOrderRequestPdf, getOrderRequests, returnO
 import Pagination from '../components/Pagination'
 import PortalLayout from '../components/PortalLayout'
 import OrderRequestPreviewModal from '../components/OrderRequestPreviewModal'
-import TextDetailModal, { TruncatedDetailLink } from '../components/TextDetailModal'
 import RequestDownloadMenu from '../components/RequestDownloadMenu'
 
 const statusText = { submitted: '待审批', pending_open: '待开单', opened: '已开单', returned: '已驳回', withdrawn: '已撤回' }
@@ -22,7 +21,6 @@ export default function ReviewerDashboard() {
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
   const [counts, setCounts] = useState({ submitted: 0, pending_open: 0, opened: 0, returned: 0, withdrawn: 0 })
-  const [generatingId, setGeneratingId] = useState(null)
   const [searchInput, setSearchInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
@@ -33,7 +31,7 @@ export default function ReviewerDashboard() {
   const [decisionBusy, setDecisionBusy] = useState(false)
   const [approvalSuccess, setApprovalSuccess] = useState(null)
   const [previewRequestId, setPreviewRequestId] = useState(null)
-  const [textDetail, setTextDetail] = useState(null)
+  const [pdfGeneratingRequestId, setPdfGeneratingRequestId] = useState(null)
   const tableWrapRef = useRef(null)
 
   useEffect(() => {
@@ -115,25 +113,6 @@ export default function ReviewerDashboard() {
     }
   }
 
-  async function generatePdf(row) {
-    if (generatingId) return
-    setGeneratingId(row.request_id)
-    try {
-      const { data } = await generateOrderRequestPdf(row.request_id)
-      const params = { page, page_size: PAGE_SIZE }
-      if (filter !== 'all') params.status = filter
-      if (keyword) params.keyword = keyword
-      const response = await getOrderRequests(params)
-      const items = Array.isArray(response.data) ? response.data : (response.data.items || [])
-      setRows(items)
-      alert(data.already_generated ? 'PDF 已生成，可以直接下载。' : 'PDF 生成完成，业务员现已可以同步下载。')
-    } catch (requestError) {
-      alert(requestError.response?.data?.message || 'PDF 生成失败，请重试')
-    } finally {
-      setGeneratingId(null)
-    }
-  }
-
   function currentPdfRow(row) {
     if (row.order_pdf_request_id) {
       return {
@@ -144,6 +123,29 @@ export default function ReviewerDashboard() {
       }
     }
     return row.attachment_file_id ? row : null
+  }
+
+  async function generatePdf(row) {
+    if (!row?.request_id || pdfGeneratingRequestId) return
+    setPdfGeneratingRequestId(row.request_id)
+    try {
+      const { data } = await generateOrderRequestPdf(row.request_id)
+      console.info('[PDF手动生成成功]', { requestId: row.request_id, orderId: row.approved_order_id, response: data })
+      alert(data?.already_generated ? 'PDF 已存在并已关联到 LIMS。' : 'PDF 生成成功并已关联到 LIMS。')
+      setRefreshKey((value) => value + 1)
+    } catch (requestError) {
+      console.error('[PDF手动生成失败]', {
+        requestId: row.request_id,
+        orderId: row.approved_order_id,
+        status: requestError.response?.status,
+        response: requestError.response?.data,
+        headers: requestError.response?.headers,
+        error: requestError
+      })
+      alert(requestError.response?.data?.message || `PDF 生成失败（HTTP ${requestError.response?.status || '未知'}），请打开浏览器控制台查看详情。`)
+    } finally {
+      setPdfGeneratingRequestId(null)
+    }
   }
 
   return (
@@ -158,7 +160,7 @@ export default function ReviewerDashboard() {
         </section>
         <section className="portal-card">
           <div className="portal-card-heading">
-            <div><h2>申请队列</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条；加急待审批优先置顶</p></div>
+            <div><h2>申请队列</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条；未生成正式单号的申请在前，其余按正式单号升序</p></div>
             <div className="portal-card-tools">
               <label className="portal-search"><span>搜索</span><input type="search" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="申请编号 / 委托方 / 委托人 / 业务员 / 正式单号" /></label>
               <div className="portal-tabs">{[['all','全部'],['submitted','待审批'],['pending_open','待开单'],['opened','已开单'],['returned','已驳回'],['withdrawn','已撤回']].map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => changeFilter(key)}>{label}</button>)}</div>
@@ -167,23 +169,24 @@ export default function ReviewerDashboard() {
           {error && <div className="portal-error">{error}</div>}
           <div className="portal-table-wrap portal-table-scroll" ref={tableWrapRef}>
             <table className="portal-table reviewer-request-table">
-              <thead><tr><th>申请编号</th><th>申请类型</th><th>申请人</th><th>业务员（服务方）</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th>提交时间</th><th>周期类型</th><th>状态</th><th>正式单号</th><th className="portal-actions">操作</th></tr></thead>
+              <thead><tr><th>正式单号</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th>申请编号</th><th>申请类型</th><th>申请人</th><th>业务员（服务方）</th><th>提交时间</th><th>周期类型</th><th>状态</th><th className="portal-actions">操作</th></tr></thead>
               <tbody>
                 {loading ? <tr><td colSpan="11" className="portal-empty">正在加载…</td></tr> : rows.length === 0 ? <tr><td colSpan="11" className="portal-empty">{keyword ? '没有匹配的申请' : '当前没有相关申请'}</td></tr> : rows.map((row) => (
                   <tr key={row.request_id} className={row.status === 'submitted' && ['urgent_1_5x', 'urgent_2x'].includes(row.order_urgency_type) ? 'portal-priority-row' : ''}>
-                    <td className="portal-mono">{row.request_no}</td><td><span className={`request-type-pill type-${row.request_type || 'normal'}`}>{requestTypeText[row.request_type || 'normal']}</span></td><td>{row.applicant_name}</td><td>{row.salesperson_name || '—'}</td><td className="commissioner-name-col"><TruncatedDetailLink value={row.customer_name} label="委托方" onOpen={setTextDetail} /></td><td className="commissioner-contact-col">{row.commissioner_contact_name || '—'}</td><td>{formatTime(row.submitted_at)}</td>
+                    <td className="portal-mono">{row.approved_order_id || '—'}</td><td className="commissioner-name-col commissioner-name-full">{row.customer_name || '—'}</td><td className="commissioner-contact-col">{row.commissioner_contact_name || '—'}</td><td className="portal-mono">{row.request_no}</td><td><span className={`request-type-pill type-${row.request_type || 'normal'}`}>{requestTypeText[row.request_type || 'normal']}</span></td><td>{row.applicant_name}</td><td>{row.salesperson_name || '—'}</td><td>{formatTime(row.submitted_at)}</td>
                     <td><span className={`urgency-pill urgency-${row.order_urgency_type || 'normal'}`}>{urgencyText[row.order_urgency_type] || '正常'}</span></td>
-                    <td><span className={`status-pill status-${row.display_status}`}>{statusText[row.display_status] || row.display_status}</span></td><td className="portal-mono">{row.approved_order_id || '—'}</td>
+                    <td><span className={`status-pill status-${row.display_status}`}>{statusText[row.display_status] || row.display_status}</span></td>
                     <td className="portal-actions">
                       <button onClick={() => setPreviewRequestId(row.request_id)}>预览</button>
                       <button className="review-action-button" disabled={row.status !== 'submitted'} onClick={() => openDecision(row)}>审批</button>
                       <button className="open-order-button" disabled={row.status !== 'approved' || Boolean(row.order_opened) || row.request_type === 'modification'} onClick={() => navigate(`/review/${row.request_id}`)}>{row.request_type === 'additional_test' ? '录入加测' : '开单'}</button>
+                      <button
+                        className="pdf-generate-button"
+                        disabled={!row.order_opened || !row.approved_order_id || Boolean(pdfGeneratingRequestId)}
+                        title={row.order_opened ? '手动生成或检查委托单 PDF' : '完成开单后才能生成 PDF'}
+                        onClick={() => generatePdf(row)}
+                      >{pdfGeneratingRequestId === row.request_id ? '生成中…' : '生成PDF'}</button>
                       <RequestDownloadMenu pdfRow={currentPdfRow(row)} flowRow={row} requirementRow={row} />
-                      {row.status === 'approved' && Boolean(row.approved_order_id) && Boolean(row.order_opened) && !Boolean(row.order_pdf_request_id) && !Boolean(row.pdf_generated) && (
-                        generatingId === row.request_id
-                          ? <span className="pdf-generation-progress"><span>生成中，约需 8–10 秒，请勿刷新</span><i /></span>
-                          : <button className="pdf-generate-button" onClick={() => generatePdf(row)}>生成PDF</button>
-                      )}
                     </td>
                   </tr>
                 ))}
@@ -237,7 +240,6 @@ export default function ReviewerDashboard() {
           </div>
         )}
         <OrderRequestPreviewModal open={Boolean(previewRequestId)} requestId={previewRequestId} onClose={() => setPreviewRequestId(null)} />
-        <TextDetailModal detail={textDetail} onClose={() => setTextDetail(null)} />
       </div>
     </PortalLayout>
   )

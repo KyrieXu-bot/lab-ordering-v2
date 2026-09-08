@@ -5,11 +5,27 @@ function saveResponse(response, fallbackName, mimeType) {
   const url = URL.createObjectURL(new Blob([response.data], { type: mimeType }))
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = fallbackName
+  anchor.download = responseFilename(response) || fallbackName
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(url)
+}
+
+function responseFilename(response) {
+  const disposition = response?.headers?.['content-disposition'] || ''
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  if (utf8Name) {
+    try { return decodeURIComponent(utf8Name) } catch (_) { return utf8Name }
+  }
+  return disposition.match(/filename="?([^";]+)"?/i)?.[1] || ''
+}
+
+function flowFallbackName(flowRow) {
+  const orderId = flowRow?.approved_order_id || '委托单'
+  const commissionerName = flowRow?.customer_name || '委托方'
+  const contactName = flowRow?.commissioner_contact_name || '联系人'
+  return `${orderId}-${commissionerName}-${contactName}.docx`
 }
 
 export default function RequestDownloadMenu({ pdfRow, flowRow, requirementRow, compact = false }) {
@@ -55,7 +71,7 @@ export default function RequestDownloadMenu({ pdfRow, flowRow, requirementRow, c
         })}>{busy === 'PDF' ? '下载中…' : '下载PDF'}</button>
         <button type="button" role="menuitem" disabled={!hasFlow || Boolean(busy)} onClick={() => run('流转单', async () => {
           const response = await downloadOrderRequestFlow(flowRow.request_id)
-          saveResponse(response, `${flowRow.approved_order_id}-流转单.docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+          saveResponse(response, flowFallbackName(flowRow), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
         })}>{busy === '流转单' ? '下载中…' : '下载流转单'}</button>
         <button type="button" role="menuitem" disabled={!hasRequirement || Boolean(busy)} title={hasRequirement ? '' : '申请时未上传测试需求单'} onClick={() => run('需求单', async () => {
           const response = await downloadOrderRequestFile(requirementRow.request_id, requirementRow.requirement_file_id)

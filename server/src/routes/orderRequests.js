@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
+const fsSync = require('fs');
 const fs = require('fs').promises;
 const multer = require('multer');
 const pool = require('../db');
@@ -15,6 +16,7 @@ const { commissionerSignatureExists } = require('../services/commissionerSignatu
 const { buildOrderRequestPdfTemplateData } = require('../services/orderRequestPdfData');
 const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow } = require('../services/orderFollowUp');
 const { buildProcessTemplateData, generateProcessTemplateBuffer } = require('../services/processTemplate');
+const { generateTestItemsTemplateBuffer } = require('../services/testItemsTemplate');
 const {
   allocateOrderId,
   buildApprovedPayload,
@@ -24,15 +26,22 @@ const {
 
 const router = express.Router();
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
+const requestAttachmentStagingRoot = path.join(uploadsRoot, '.order-request-staging');
 const requestAttachmentUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024, files: 1 }
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      try {
+        fsSync.mkdirSync(requestAttachmentStagingRoot, { recursive: true });
+        callback(null, requestAttachmentStagingRoot);
+      } catch (error) { callback(error); }
+    },
+    filename: (_req, _file, callback) => callback(null, `${Date.now()}-${crypto.randomBytes(12).toString('hex')}.upload`)
+  })
 }).single('file');
 
 function receiveRequestAttachment(req, res, next) {
   requestAttachmentUpload(req, res, (error) => {
     if (!error) return next();
-    if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ message: '单个附件不能超过 20MB' });
     return res.status(400).json({ message: '附件上传失败，请检查文件后重试' });
   });
 }
@@ -49,6 +58,17 @@ function requestNumber(id) {
 function safeFilePart(value, fallback = '未填写') {
   const text = String(value || fallback).trim();
   return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
+}
+
+function buildFlowDocumentFilename(orderId, commissionerName, contactName) {
+  return `${safeFilePart(orderId, '委托单')}-${safeFilePart(commissionerName, '委托方')}-${safeFilePart(contactName, '联系人')}.docx`;
+}
+
+function reviewerOrderBySql(displayOrderSql) {
+  return `ORDER BY
+           CASE WHEN ${displayOrderSql} IS NULL THEN 0 ELSE 1 END,
+           ${displayOrderSql} ASC,
+           r.request_id ASC`;
 }
 
 function cleanOriginalFilename(value) {
@@ -68,6 +88,17 @@ function resolveUploadPath(storedPath) {
     throw Object.assign(new Error('附件存储路径不合法'), { status: 400 });
   }
   return absolutePath;
+}
+
+async function detectSupportedImageFile(filePath) {
+  const header = Buffer.alloc(8);
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    return detectSupportedImageType(header.subarray(0, bytesRead));
+  } finally {
+    await handle.close();
+  }
 }
 
 async function nextVersionedPdfPaths(absoluteDir, baseName) {
@@ -126,7 +157,29 @@ async function addEvent(conn, requestId, userId, eventType, note = null) {
   );
 }
 
-async function linkRequestFilesToLims(conn, requestId, orderId) {
+async function insertProjectFileLinks(conn, requestFiles, orderId, testItemIds) {
+  for (const requestFile of requestFiles) {
+    const projectFilename = String(requestFile.original_filename || '附件').slice(0, 200);
+    const projectFilepath = resolveUploadPath(requestFile.stored_path).replace(/\\/g, '/');
+    for (const testItemId of testItemIds) {
+      await conn.query(
+        `INSERT INTO project_files
+          (category, filename, filepath, order_id, test_item_id, sample_id, uploaded_by)
+         SELECT 'order_attachment', ?, ?, ?, ?, NULL, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM project_files existing_file
+           WHERE existing_file.category = 'order_attachment'
+             AND existing_file.order_id = ? AND existing_file.test_item_id = ?
+             AND existing_file.filepath = ?
+         )`,
+        [projectFilename, projectFilepath, orderId, testItemId, requestFile.created_by,
+          orderId, testItemId, projectFilepath]
+      );
+    }
+  }
+}
+
+async function linkRequestFilesToLims(conn, requestId, orderId, targetTestItemIds = null) {
   const [requestFiles] = await conn.query(
     `SELECT original_filename, stored_path, created_by
      FROM order_request_files
@@ -135,22 +188,35 @@ async function linkRequestFilesToLims(conn, requestId, orderId) {
     [requestId]
   );
   if (!requestFiles.length) return;
-  const [testItems] = await conn.query(
-    `SELECT test_item_id FROM test_items WHERE order_id = ? ORDER BY test_item_id`,
-    [orderId]
-  );
-  for (const requestFile of requestFiles) {
-    const projectFilename = String(requestFile.original_filename || '附件').slice(0, 200);
-    const projectFilepath = resolveUploadPath(requestFile.stored_path).replace(/\\/g, '/');
-    for (const testItem of testItems) {
-      await conn.query(
-        `INSERT INTO project_files
-          (category, filename, filepath, order_id, test_item_id, sample_id, uploaded_by)
-         VALUES ('order_attachment', ?, ?, ?, ?, NULL, ?)`,
-        [projectFilename, projectFilepath, orderId, testItem.test_item_id, requestFile.created_by]
-      );
-    }
+  let testItemIds = targetTestItemIds;
+  if (!Array.isArray(testItemIds)) {
+    const [testItems] = await conn.query(
+      `SELECT test_item_id FROM test_items WHERE order_id = ? ORDER BY test_item_id`,
+      [orderId]
+    );
+    testItemIds = testItems.map((item) => item.test_item_id);
   }
+  await insertProjectFileLinks(conn, requestFiles, orderId, testItemIds);
+}
+
+async function linkExistingRequirementsToAddedTests(conn, orderId, testItemIds, currentRequestId) {
+  if (!Array.isArray(testItemIds) || !testItemIds.length) return;
+  const [requestFiles] = await conn.query(
+    `SELECT f.original_filename, f.stored_path, f.created_by
+     FROM order_request_files f
+     JOIN order_requests owner_request ON owner_request.request_id = f.request_id
+     WHERE f.file_type IN ('user_upload', 'test_requirement')
+       AND owner_request.status = 'approved'
+       AND COALESCE(owner_request.approved_order_id, owner_request.target_order_id) = ?
+       AND (owner_request.request_id = ? OR EXISTS (
+         SELECT 1 FROM project_files existing_file
+         WHERE existing_file.order_id = ? AND existing_file.category = 'order_attachment'
+           AND existing_file.filepath LIKE CONCAT('%/', f.stored_path)
+       ))
+     ORDER BY f.file_id`,
+    [orderId, currentRequestId, orderId]
+  );
+  await insertProjectFileLinks(conn, requestFiles, orderId, testItemIds);
 }
 
 async function attachCurrentOrderPdfs(rows) {
@@ -275,13 +341,7 @@ router.get('/', async (req, res, next) => {
       'normal'
     )`;
     const orderBy = reviewer
-      ? `ORDER BY
-           CASE
-             WHEN r.status = 'submitted' AND ${urgencySql} IN ('urgent_1_5x', 'urgent_2x') THEN 0
-             WHEN r.status = 'submitted' THEN 1
-             ELSE 2
-           END,
-           r.submitted_at DESC, r.request_id DESC`
+      ? reviewerOrderBySql(displayOrderSql)
       : `ORDER BY CASE WHEN r.status = 'submitted' THEN 0 ELSE 1 END,
            r.submitted_at DESC, r.request_id DESC`;
     const limitSql = paginationRequested ? 'LIMIT ? OFFSET ?' : '';
@@ -522,7 +582,7 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
       [req.params.id]
     );
     if (!source) throw Object.assign(new Error('原申请不存在'), { status: 404 });
-    if (source.applicant_user_id !== req.user.user_id) throw Object.assign(new Error('无权操作该申请'), { status: 403 });
+    if (!await canAccessRequest(source, req.user, conn)) throw Object.assign(new Error('无权操作该申请'), { status: 403 });
     if (source.status !== 'approved') throw Object.assign(new Error('只有已通过的申请才能发起修改或加测'), { status: 409 });
     const targetOrderId = source.approved_order_id || source.target_order_id;
     if (!targetOrderId) throw Object.assign(new Error('原申请尚未完成正式开单'), { status: 409 });
@@ -664,16 +724,20 @@ router.get('/:id/files', async (req, res, next) => {
 router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
   const conn = await pool.getConnection();
   let absolutePath = null;
+  const stagedPath = req.file?.path || null;
   try {
     if (!req.file) return res.status(400).json({ message: '请选择需要上传的附件' });
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, applicant_user_id, status, version
+      `SELECT request_id, applicant_user_id, status, request_type, version
        FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
     if (!row) throw Object.assign(new Error('申请不存在'), { status: 404 });
     if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权上传该申请附件'), { status: 403 });
+    if (row.request_type === 'additional_test') {
+      throw Object.assign(new Error('加测申请附件仅支持查看和下载'), { status: 409 });
+    }
     const reviewer = isReviewer(req.user);
     const canUpload = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
     if (!canUpload) throw Object.assign(new Error('当前申请状态不能上传附件'), { status: 409 });
@@ -682,7 +746,7 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     if (!['test_requirement', 'request_image'].includes(attachmentKind)) {
       throw Object.assign(new Error('附件分类不正确'), { status: 400 });
     }
-    const detectedImage = attachmentKind === 'request_image' ? detectSupportedImageType(req.file.buffer) : null;
+    const detectedImage = attachmentKind === 'request_image' ? await detectSupportedImageFile(stagedPath) : null;
     if (attachmentKind === 'request_image' && !detectedImage) {
       throw Object.assign(new Error('附件图片仅支持 PNG、JPG 或 JPEG 格式'), { status: 415 });
     }
@@ -694,7 +758,7 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     const storedPath = path.posix.join('order-request-attachments', String(row.request_id), storedFilename);
     absolutePath = resolveUploadPath(storedPath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, req.file.buffer, { flag: 'wx' });
+    await fs.rename(stagedPath, absolutePath);
 
     const [result] = await conn.query(
       `INSERT INTO order_request_files
@@ -725,6 +789,7 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     });
   } catch (error) {
     await conn.rollback().catch(() => {});
+    if (stagedPath) await fs.rm(stagedPath, { force: true }).catch(() => {});
     if (absolutePath) await fs.rm(absolutePath, { force: true }).catch(() => {});
     if (error.status) return res.status(error.status).json({ message: error.message });
     next(error);
@@ -771,7 +836,7 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
   try {
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT r.request_id, r.applicant_user_id, r.status, r.version, f.file_id, f.file_type, f.stored_path
+      `SELECT r.request_id, r.applicant_user_id, r.status, r.request_type, r.version, f.file_id, f.file_type, f.stored_path
        FROM order_requests r
        JOIN order_request_files f ON f.request_id = r.request_id
        WHERE r.request_id = ? AND f.file_id = ?
@@ -781,6 +846,9 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
     );
     if (!row) throw Object.assign(new Error('附件不存在'), { status: 404 });
     if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权删除该申请附件'), { status: 403 });
+    if (row.request_type === 'additional_test') {
+      throw Object.assign(new Error('加测申请附件仅支持查看和下载'), { status: 409 });
+    }
     const reviewer = isReviewer(req.user);
     const canDelete = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
     if (!canDelete) throw Object.assign(new Error(
@@ -1091,7 +1159,13 @@ router.get('/:id/flow-document', async (req, res, next) => {
     if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权下载该申请的流转单' });
     const orderId = String(row.approved_order_id || row.target_order_id || '').trim();
     if (!orderId) return res.status(409).json({ message: '完成开单后才能下载流转单' });
-    const [[orderExists]] = await pool.query('SELECT order_id FROM orders WHERE order_id = ? LIMIT 1', [orderId]);
+    const [[orderExists]] = await pool.query(
+      `SELECT o.order_id, m.commissioner_name, m.contact_name
+       FROM orders o
+       LEFT JOIN commissioners m ON m.commissioner_id = o.commissioner_id
+       WHERE o.order_id = ? LIMIT 1`,
+      [orderId]
+    );
     if (!orderExists) return res.status(409).json({ message: '完成开单后才能下载流转单' });
 
     const [[baseRequest]] = await pool.query(
@@ -1118,9 +1192,30 @@ router.get('/:id/flow-document', async (req, res, next) => {
     const items = await getOrderTestItemsForFlow(pool, orderId);
     const flowData = buildProcessTemplateData(packet, orderId, items);
     const buffer = await generateProcessTemplateBuffer(flowData);
-    const customerName = safeFilePart(flowData.customer_name, '委托方');
-    const contactName = safeFilePart(flowData.customer_contactName, '联系人');
-    const filename = `${safeFilePart(orderId, '委托单')}-${customerName}-${contactName}-流转单.docx`;
+    const filename = buildFlowDocumentFilename(orderId, orderExists.commissioner_name, orderExists.contact_name);
+    res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(buffer);
+  } catch (error) { next(error); }
+});
+
+router.get('/:id/test-items-document', requireReviewer, async (req, res, next) => {
+  try {
+    const [[row]] = await pool.query(
+      `SELECT r.request_id, r.applicant_user_id, r.reviewed_payload, r.submitted_payload
+       FROM order_requests r WHERE r.request_id = ?`,
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ message: '申请不存在' });
+    if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权导出该申请的检测项目' });
+    const packet = parseJson(row.reviewed_payload) || parseJson(row.submitted_payload) || {};
+    const snapshot = packet.formSnapshot || {};
+    const testItems = Array.isArray(snapshot.businessTestItems)
+      ? snapshot.businessTestItems
+      : (Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
+    if (!testItems.length) return res.status(409).json({ message: '该申请没有可导出的业务检测项目' });
+    const buffer = await generateTestItemsTemplateBuffer(testItems);
+    const filename = `${requestNumber(row.request_id)}-业务申请检测项目.docx`;
     res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
     res.send(buffer);
@@ -1436,13 +1531,14 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
           operatorUserId: req.user.user_id
         });
     const flowTestItems = await getOrderTestItemsForFlow(conn, result.orderNum);
-    await linkRequestFilesToLims(conn, row.request_id, result.orderNum);
     if (row.request_type === 'additional_test') {
+      await linkExistingRequirementsToAddedTests(conn, result.orderNum, result.testItemIds, row.request_id);
       await conn.query(
         `UPDATE order_requests SET reviewed_payload = ?, applied_at = CURRENT_TIMESTAMP(3), version = version + 1 WHERE request_id = ?`,
         [JSON.stringify(reviewedPayload), row.request_id]
       );
     } else {
+      await linkRequestFilesToLims(conn, row.request_id, result.orderNum);
       await conn.query(
         `UPDATE order_requests SET reviewed_payload = ?, approved_order_id = ?, applied_at = CURRENT_TIMESTAMP(3), version = version + 1 WHERE request_id = ?`,
         [JSON.stringify(reviewedPayload), result.orderNum, row.request_id]
@@ -1458,4 +1554,10 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
   } finally { conn.release(); }
 });
 
-module.exports = { router };
+module.exports = {
+  router,
+  buildFlowDocumentFilename,
+  reviewerOrderBySql,
+  insertProjectFileLinks,
+  linkExistingRequirementsToAddedTests
+};
