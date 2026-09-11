@@ -12,6 +12,7 @@ export default function Pagination({ page, totalPages, total, onChange }) {
     <nav className="portal-pagination" aria-label="申请列表分页">
       <span className="portal-pagination-summary">第 {page} / {totalPages} 页 · 共 {total} 条</span>
       <div className="portal-pagination-buttons">
+        <button type="button" disabled={page <= 1} onClick={() => onChange(1)}>首页</button>
         <button type="button" disabled={page <= 1} onClick={() => onChange(page - 1)}>上一页</button>
         {pages.map((value) => (
           <button
@@ -25,6 +26,7 @@ export default function Pagination({ page, totalPages, total, onChange }) {
           </button>
         ))}
         <button type="button" disabled={page >= totalPages} onClick={() => onChange(page + 1)}>下一页</button>
+        <button type="button" disabled={page >= totalPages} onClick={() => onChange(totalPages)}>末页</button>
       </div>
     </nav>
   )

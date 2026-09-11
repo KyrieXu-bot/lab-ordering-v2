@@ -106,6 +106,8 @@ function buildRequestTemplateData(commissionData, context) {
     brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑' : '☐',
     sales_user_id: salesUserId,
     sales_signature_date: salesSignatureDate || '',
+    commissioner_id: selectedCustomer?.commissioner_id || commissionData.commissionerId || '',
+    customer_signature_date: salesSignatureDate || formatSignatureDate(),
     sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone,
     testItems: commissionData.testItems.map((item, index) => ({
       ...item, idx: index + 1, material: String(item.material || '').trim(),
@@ -327,6 +329,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const isAdditionalTestWorkflow = isAdditionalTestMode || isReviewingAdditionalTest;
   const areAttachmentsReadOnly = workflowMode === 'additionalTest' || requestMeta?.requestType === 'additional_test';
   const isSalesRequestMode = ['request', 'edit', 'change', 'additionalTest'].includes(workflowMode);
+  const requiresCompleteSignatures = workflowMode === 'direct' || isSalesRequestMode;
   const [businessTestItemsSnapshot, setBusinessTestItemsSnapshot] = useState([]);
   const [requestAttachments, setRequestAttachments] = useState([]);
   const [pendingAttachments, setPendingAttachments] = useState([]);
@@ -1374,13 +1377,23 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (workflowMode === 'request' && selectedCustomer && commissionerSignatureStatus !== 'ready') {
+    if (requiresCompleteSignatures && selectedCustomer && commissionerSignatureStatus !== 'ready') {
       if (commissionerSignatureStatus === 'loading' || commissionerSignatureUploading) {
         alert('正在检测或上传委托方签名，请稍后再提交。');
       } else if (commissionerSignatureStatus === 'error') {
         alert('委托方签名检测失败，请刷新页面后重试。');
       } else {
         alert('提交失败！该委托方尚未配置电子签名，请先上传签名。');
+      }
+      return;
+    }
+    if (requiresCompleteSignatures && salesUserId && salesSignatureStatus !== 'ready') {
+      if (salesSignatureStatus === 'loading') {
+        alert('正在检测业务服务方签名，请稍后再提交。');
+      } else if (salesSignatureStatus === 'error') {
+        alert('业务服务方签名文件格式不正确或加载失败，请联系管理员处理。');
+      } else {
+        alert('提交失败！该业务服务方尚未配置电子签名，请联系管理员处理。');
       }
       return;
     }
@@ -1760,6 +1773,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         brittleNoSymbol: commissionData.sampleRequirements.brittle === 'no' ? '☑' : '☐',
         sales_user_id: salesUserId,
         sales_signature_date: salesSignatureDate || '',
+        commissioner_id: selectedCustomer.commissioner_id,
+        customer_signature_date: salesSignatureDate || formatSignatureDate(),
         sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone,
         testItems: commissionData.testItems.map((item, i) => ({
           ...item,
@@ -1997,9 +2012,17 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         <h1>集萃检测开单系统</h1>
         <h2>检测委托合同<br/>Testing Application Contract</h2>
       </div>
-      <form onSubmit={handleSubmit} onChangeCapture={(event) => {
-        if (isModificationMode && !event.target.disabled) event.target.classList.add('change-field-highlight');
-      }}>
+      <form
+        onSubmit={handleSubmit}
+        onKeyDown={(event) => {
+          if (isSalesRequestMode && event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
+            event.preventDefault();
+          }
+        }}
+        onChangeCapture={(event) => {
+          if (isModificationMode && !event.target.disabled) event.target.classList.add('change-field-highlight');
+        }}
+      >
         <fieldset className="workflow-form-shell" disabled={isReadOnly}>
         {(['direct', 'request'].includes(workflowMode) || (workflowMode === 'edit' && (requestMeta?.requestType || 'normal') === 'normal')) && (
           <section className="order-prefill-panel" aria-labelledby="order-prefill-title">
@@ -2474,13 +2497,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                         <td className="sample-wide-col">{item.material || '—'}</td>
                         <td>{sampleTypeText}</td>
                         <td className="sample-wide-col">{item.original_no || '—'}</td>
-                        <td>{item.test_item || '—'}</td>
+                        <td className="business-multiline-value">{item.test_item || '—'}</td>
                         <td>{item.test_method || '—'}</td>
                         <td>{item.arrival_mode === 'on_site' ? '现场到达' : ['mail', 'delivery'].includes(item.arrival_mode) ? '寄样' : '—'}</td>
                         <td>{item.sample_arrival_status === 'arrived' ? '是' : item.sample_arrival_status === 'not_arrived' ? '否' : '—'}</td>
                         <td>{item.flow_note || '—'}</td>
                         <td>{item.quantity || '—'}</td>
-                        <td>{item.note || '—'}</td>
+                        <td className="business-multiline-value">{item.note || '—'}</td>
                       </tr>
                     );
                   })}
@@ -2526,7 +2549,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                         <td className="sample-wide-col"><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
                         <td><input type="text" value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
                         <td className="sample-wide-col"><input type="text" value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
-                        <td><input type="text" value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
+                        <td><textarea rows={2} value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
                         <td><input type="text" value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
                         <td className="business-choice-cell">
                           {arrivalMethodOptions.map(option => (
@@ -2566,7 +2589,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                         </td>
                         <td><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} /></td>
                         <td><input type="text" value={item.quantity || ''} onChange={e => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
-                        <td><input type="text" value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
+                        <td><textarea rows={2} value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
                         <td className="action-col add-remove-buttons">
                           {!(isModificationMode || item._locked) && <><button type="button" className="copy-button" onClick={() => duplicateTestItem(index)}>复制</button><button type="button" className="remove-button" onClick={() => removeTestItem(index)}>删除</button></>}
                           {(isModificationMode || item._locked) && <span className="locked-item-label">{isModificationMode ? '项目名称已锁定' : '原项目'}</span>}
@@ -2936,6 +2959,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 </div>
               )}
               <input ref={commissionerSignatureInputRef} className="commissioner-signature-file" type="file" accept="image/png,.png" onChange={handleCommissionerSignatureUpload} />
+              {selectedCustomer && salesSignatureDate && <time dateTime={salesSignatureDate}>{salesSignatureDate}</time>}
             </div>
           </div>
           <div className="signature-confirmation-cell">
@@ -2973,8 +2997,12 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <button
               type="submit"
               className="submit"
-              disabled={workflowMode === 'request' && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready'}
-              title={workflowMode === 'request' && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready' ? '请先上传委托方电子签名' : undefined}
+              disabled={requiresCompleteSignatures && Boolean(selectedCustomer) && (commissionerSignatureStatus !== 'ready' || (Boolean(salesUserId) && salesSignatureStatus !== 'ready'))}
+              title={requiresCompleteSignatures && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready'
+                ? '请先上传委托方电子签名'
+                : requiresCompleteSignatures && Boolean(salesUserId) && salesSignatureStatus !== 'ready'
+                  ? '业务服务方电子签名不可用，请联系管理员处理'
+                  : undefined}
             >
               {workflowMode === 'review'
                 ? '确认开单'
@@ -3001,7 +3029,15 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           ]}
           packet={{
             formSnapshot: { formData, businessTestItems: isAdditionalTestWorkflow ? formData.testItems.filter((item) => !item._locked) : formData.testItems, selectedCustomer, selectedPayer, orderMonthPreference, salesUserId, salesName, salesEmail, salesPhone },
-            templateData: { sales_user_id: salesUserId, sales_name: salesName, sales_email: salesEmail, sales_phone: salesPhone, sales_signature_date: salesSignatureDate }
+            templateData: {
+              sales_user_id: salesUserId,
+              sales_name: salesName,
+              sales_email: salesEmail,
+              sales_phone: salesPhone,
+              sales_signature_date: salesSignatureDate,
+              commissioner_id: selectedCustomer?.commissioner_id || '',
+              customer_signature_date: salesSignatureDate || ''
+            }
           }}
           requestMeta={isAdditionalTestWorkflow ? { ...(requestMeta || {}), request_type: 'additional_test' } : requestMeta}
           commissionerSignatureUrl={commissionerSignatureUrl}

@@ -169,12 +169,13 @@ export default function ReviewerDashboard() {
           {error && <div className="portal-error">{error}</div>}
           <div className="portal-table-wrap portal-table-scroll" ref={tableWrapRef}>
             <table className="portal-table reviewer-request-table">
-              <thead><tr><th>正式单号</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th>申请编号</th><th>申请类型</th><th>申请人</th><th>业务员（服务方）</th><th>提交时间</th><th>周期类型</th><th>状态</th><th className="portal-actions">操作</th></tr></thead>
+              <thead><tr><th>正式单号</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th>申请编号</th><th>申请类型</th><th>申请人</th><th>业务员（服务方）</th><th>提交时间</th><th>周期类型</th><th>到达方式</th><th>状态</th><th className="portal-actions">操作</th></tr></thead>
               <tbody>
-                {loading ? <tr><td colSpan="11" className="portal-empty">正在加载…</td></tr> : rows.length === 0 ? <tr><td colSpan="11" className="portal-empty">{keyword ? '没有匹配的申请' : '当前没有相关申请'}</td></tr> : rows.map((row) => (
+                {loading ? <tr><td colSpan="12" className="portal-empty">正在加载…</td></tr> : rows.length === 0 ? <tr><td colSpan="12" className="portal-empty">{keyword ? '没有匹配的申请' : '当前没有相关申请'}</td></tr> : rows.map((row) => (
                   <tr key={row.request_id} className={row.status === 'submitted' && ['urgent_1_5x', 'urgent_2x'].includes(row.order_urgency_type) ? 'portal-priority-row' : ''}>
                     <td className="portal-mono">{row.approved_order_id || '—'}</td><td className="commissioner-name-col commissioner-name-full">{row.customer_name || '—'}</td><td className="commissioner-contact-col">{row.commissioner_contact_name || '—'}</td><td className="portal-mono">{row.request_no}</td><td><span className={`request-type-pill type-${row.request_type || 'normal'}`}>{requestTypeText[row.request_type || 'normal']}</span></td><td>{row.applicant_name}</td><td>{row.salesperson_name || '—'}</td><td>{formatTime(row.submitted_at)}</td>
                     <td><span className={`urgency-pill urgency-${row.order_urgency_type || 'normal'}`}>{urgencyText[row.order_urgency_type] || '正常'}</span></td>
+                    <td><span className="arrival-summary"><span>{row.arrival_mode === 'on_site' ? '现场' : row.arrival_mode === 'delivery' ? '寄样' : '—'}</span>{Number(row.test_item_count) > 0 && <span className={`item-count-pill ${Number(row.test_item_count) > 1 ? 'multiple' : 'single'}`} title={`共 ${row.test_item_count} 行项目`}>{Number(row.test_item_count) > 1 ? '多' : '单'}</span>}</span></td>
                     <td><span className={`status-pill status-${row.display_status}`}>{statusText[row.display_status] || row.display_status}</span></td>
                     <td className="portal-actions">
                       <button onClick={() => setPreviewRequestId(row.request_id)}>预览</button>

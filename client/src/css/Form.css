@@ -474,12 +474,15 @@ body {
 .workflow-change-mode .change-field-highlight + span { color:#a63f36; }
 .workflow-change-mode .add-test-item-button { display:none!important; }
 .business-test-item-table .locked-test-item-row { background:#f2f3f1; }
-.business-test-item-table .locked-test-item-row input { background:#eceeeb !important; color:#68716d; pointer-events:none; }
+.business-test-item-table .locked-test-item-row input,
+.business-test-item-table .locked-test-item-row textarea { background:#eceeeb !important; color:#68716d; pointer-events:none; }
 .business-test-item-table .locked-test-item-row label { color:#7d8581; pointer-events:none; }
 .business-test-item-table .additional-new-test-row { background:#fff4dc; box-shadow:inset 4px 0 0 #d88a28; }
 .business-test-item-table .additional-new-test-row td { background:#fff8e9; border-top-color:#e5b873; border-bottom-color:#e5b873; }
-.business-test-item-table .additional-new-test-row input { border-color:#d9a354; background:#fffdf8; box-shadow:0 0 0 2px rgba(216,138,40,.08); }
-.business-test-item-table .additional-new-test-row input:focus { border-color:#be7018; box-shadow:0 0 0 3px rgba(216,138,40,.16); }
+.business-test-item-table .additional-new-test-row input,
+.business-test-item-table .additional-new-test-row textarea { border-color:#d9a354; background:#fffdf8; box-shadow:0 0 0 2px rgba(216,138,40,.08); }
+.business-test-item-table .additional-new-test-row input:focus,
+.business-test-item-table .additional-new-test-row textarea:focus { border-color:#be7018; box-shadow:0 0 0 3px rgba(216,138,40,.16); }
 .test-item-table .formal-locked-test-row td { background:#f0f2f0; color:#737c77; }
 .test-item-table .formal-locked-test-row input,
 .test-item-table .formal-locked-test-row select,
@@ -511,6 +514,7 @@ body {
 .workflow-additional-test-mode form .modal input,
 .workflow-additional-test-mode form .modal select,
 .workflow-additional-test-mode form .modal button,
+.workflow-additional-test-mode form .order-preview-modal button,
 .workflow-additional-test-mode .add-test-item-button button,
 .workflow-additional-test-mode .workflow-submit-actions button { pointer-events:auto; }
 
@@ -834,7 +838,8 @@ button:hover {
 .business-test-item-table th.num,
 .business-test-item-table td.num { width: 42px; min-width: 42px; text-align: center; }
 .business-test-item-table td { min-width: 120px; }
-.business-test-item-table input {
+.business-test-item-table input,
+.business-test-item-table textarea {
     box-sizing: border-box;
     width: 100%;
     min-width: 110px;
@@ -843,6 +848,11 @@ button:hover {
     border: 1px solid #c8cfcb;
     border-radius: 6px;
     background: #fff;
+}
+.business-test-item-table textarea {
+    min-height: 48px;
+    line-height: 1.4;
+    resize: vertical;
 }
 .business-test-item-table .business-test-name-col,
 .business-test-item-table td:nth-child(6) { width: 345px; min-width: 345px; }
@@ -891,6 +901,7 @@ button:hover {
 .business-test-snapshot .test-item-table-wrapper { margin-bottom: 0; }
 .business-snapshot-table { min-width: 1445px; background: #fff; }
 .business-snapshot-table td { min-width: 105px; white-space: normal; }
+.business-snapshot-table .business-multiline-value { white-space: pre-wrap; }
 .business-snapshot-table th:nth-child(6),
 .business-snapshot-table td:nth-child(6) { width: 345px; min-width: 345px; }
 .business-snapshot-table th:nth-child(7),
@@ -935,7 +946,8 @@ button:hover {
     padding: 5px;
     overflow-wrap: anywhere;
 }
-.workflow-form-page .business-entry-scroll input { min-width: 0; padding: 7px 6px; }
+.workflow-form-page .business-entry-scroll input,
+.workflow-form-page .business-entry-scroll textarea { min-width: 0; padding: 7px 6px; }
 .workflow-form-page .business-entry-scroll .business-choice-col,
 .workflow-form-page .business-entry-scroll .business-choice-cell,
 .workflow-form-page .business-entry-scroll .business-flow-note-col { min-width: 0; }
@@ -1091,7 +1103,6 @@ button:hover {
     /* 垂直内边距可以根据喜好再调 */
     font-size: 14px;
 }
-
 
 .test-item-table select {
     width: 160px;
