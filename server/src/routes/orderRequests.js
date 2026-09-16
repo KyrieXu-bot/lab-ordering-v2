@@ -11,9 +11,13 @@ const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
 const { addSampleFlowQrToPdf, sampleFlowTokenPersistencePlan } = require('../services/sampleFlowQr');
 const { appendRequestImagesToPdf, detectSupportedImageType } = require('../services/orderAttachmentImages');
-const { syncRequestSalesperson } = require('../services/salesSignature');
+const { syncRequestSalesperson, signatureExists, formatLocalDate } = require('../services/salesSignature');
 const { commissionerSignatureExists } = require('../services/commissionerSignature');
-const { buildOrderRequestPdfTemplateData } = require('../services/orderRequestPdfData');
+const {
+  buildOrderRequestPdfTemplateData,
+  originalApplicationSignatureDates,
+  additionalTestsAfterModification
+} = require('../services/orderRequestPdfData');
 const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow } = require('../services/orderFollowUp');
 const { buildProcessTemplateData, generateProcessTemplateBuffer } = require('../services/processTemplate');
 const { generateTestItemsTemplateBuffer } = require('../services/testItemsTemplate');
@@ -27,6 +31,8 @@ const {
 const router = express.Router();
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
 const requestAttachmentStagingRoot = path.join(uploadsRoot, '.order-request-staging');
+// 存储文件名中的内容版本标记，用于让本修复上线前生成的修改版 PDF 自动失效一次。
+const MODIFICATION_PDF_STORAGE_REVISION = '-modification-items-v2';
 const requestAttachmentUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, callback) => {
@@ -38,6 +44,48 @@ const requestAttachmentUpload = multer({
     filename: (_req, _file, callback) => callback(null, `${Date.now()}-${crypto.randomBytes(12).toString('hex')}.upload`)
   })
 }).single('file');
+
+function syncCommissionerSignatureMetadata(requestPayload) {
+  const commissionerId = requestPayload?.commissionData?.commissionerId;
+  const templateData = requestPayload.templateData || (requestPayload.templateData = {});
+  templateData.commissioner_id = commissionerId || templateData.commissioner_id || '';
+  templateData.customer_signature_date = templateData.customer_signature_date || formatLocalDate();
+}
+
+async function getOriginalApplicationSignatureMetadata(queryable, orderId) {
+  if (!orderId) return null;
+  const [[originalRequest]] = await queryable.query(
+    `SELECT submitted_payload, DATE_FORMAT(submitted_at, '%Y-%m-%d') AS application_date
+     FROM order_requests
+     WHERE request_type = 'normal' AND approved_order_id = ? AND status = 'approved'
+     ORDER BY request_id LIMIT 1`,
+    [orderId]
+  );
+  if (!originalRequest) return null;
+  const dates = originalApplicationSignatureDates(parseJson(originalRequest.submitted_payload), originalRequest.application_date);
+  return {
+    applicationDate: originalRequest.application_date || dates.customerDate || dates.salesDate || '',
+    customerDate: dates.customerDate,
+    salesDate: dates.salesDate
+  };
+}
+
+async function preserveOriginalApplicationSignatureDates(queryable, requestPayload, orderId) {
+  const original = await getOriginalApplicationSignatureMetadata(queryable, orderId);
+  if (!original) throw Object.assign(new Error('未找到该委托单的原始申请日期'), { status: 409 });
+  const templateData = requestPayload.templateData || (requestPayload.templateData = {});
+  templateData.customer_signature_date = original.customerDate;
+  templateData.sales_signature_date = original.salesDate;
+  return original;
+}
+
+async function setModificationBaselineTestItems(queryable, requestPayload, orderId, existingPayload = null) {
+  requestPayload.formSnapshot = requestPayload.formSnapshot || {};
+  const savedBaseline = existingPayload?.formSnapshot?.modificationBaselineTestItems;
+  requestPayload.formSnapshot.modificationBaselineTestItems = Array.isArray(savedBaseline) && savedBaseline.length
+    ? savedBaseline
+    : await getOrderTestItemsForFlow(queryable, orderId);
+}
 
 function receiveRequestAttachment(req, res, next) {
   requestAttachmentUpload(req, res, (error) => {
@@ -55,13 +103,52 @@ function requestNumber(id) {
   return `SQ${String(id).padStart(8, '0')}`;
 }
 
+function requestArrivalSummary(payload) {
+  const packet = parseJson(payload) || {};
+  const snapshot = packet.formSnapshot || {};
+  const testItems = Array.isArray(snapshot.businessTestItems)
+    ? snapshot.businessTestItems
+    : Array.isArray(snapshot.formData?.testItems)
+      ? snapshot.formData.testItems
+      : Array.isArray(packet.commissionData?.testItems)
+        ? packet.commissionData.testItems
+        : [];
+  const firstSelectedItem = testItems.find((item) => ['on_site', 'mail', 'delivery'].includes(item?.arrival_mode));
+  const rawArrivalMode = firstSelectedItem?.arrival_mode;
+  const arrivalMode = rawArrivalMode === 'on_site'
+    ? 'on_site'
+    : ['mail', 'delivery'].includes(rawArrivalMode)
+      ? 'delivery'
+      : null;
+  return { arrival_mode: arrivalMode, test_item_count: testItems.length };
+}
+
+function validateBusinessTestItemArrival(testItems) {
+  if (!Array.isArray(testItems)) return '申请内容格式不正确';
+  for (let index = 0; index < testItems.length; index += 1) {
+    const item = testItems[index] || {};
+    if (!['on_site', 'mail', 'delivery'].includes(item.arrival_mode)) {
+      return `第${index + 1}行：到达方式为必填项`;
+    }
+    if (!['arrived', 'not_arrived'].includes(item.sample_arrival_status)) {
+      return `第${index + 1}行：是否到达为必填项`;
+    }
+  }
+  return null;
+}
+
 function safeFilePart(value, fallback = '未填写') {
   const text = String(value || fallback).trim();
   return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
 }
 
-function buildFlowDocumentFilename(orderId, commissionerName, contactName) {
-  return `${safeFilePart(orderId, '委托单')}-${safeFilePart(commissionerName, '委托方')}-${safeFilePart(contactName, '联系人')}.docx`;
+function buildFlowDocumentFilename(orderId) {
+  return `${safeFilePart(orderId, '委托单')}-流转单.docx`;
+}
+
+function buildRequirementDownloadFilename(orderId, originalFilename) {
+  const extension = path.extname(String(originalFilename || '')).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 12);
+  return `${safeFilePart(orderId, '委托单')}-需求单${extension}`;
 }
 
 function reviewerOrderBySql(displayOrderSql) {
@@ -278,13 +365,18 @@ router.get('/', async (req, res, next) => {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, Number.parseInt(req.query.page_size, 10) || 20));
     const allowedStatuses = new Set(['submitted', 'pending_open', 'opened', 'returned', 'withdrawn']);
+    const allowedRequestTypes = new Set(['normal', 'additional_test', 'modification']);
     const requestedStatus = String(req.query.status || '').trim();
+    const requestedType = String(req.query.request_type || '').trim();
     const keyword = String(req.query.keyword || '').trim().slice(0, 100);
     const reservedOrderSql = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.workflow.reservedOrderId')), 'null')`;
     const displayOrderSql = `COALESCE(r.approved_order_id, r.target_order_id, ${reservedOrderSql})`;
     const displayStatusSql = workflowStatusSql('r');
     if (requestedStatus && !allowedStatuses.has(requestedStatus)) {
       return res.status(400).json({ message: '申请状态筛选值不正确' });
+    }
+    if (requestedType && !allowedRequestTypes.has(requestedType)) {
+      return res.status(400).json({ message: '申请类型筛选值不正确' });
     }
 
     const baseConditions = [];
@@ -295,6 +387,10 @@ router.get('/', async (req, res, next) => {
         WHERE access_payer.payer_id = r.payer_id AND access_payer.owner_user_id = ?
       ))`);
       baseParams.push(req.user.user_id, req.user.user_id);
+    }
+    if (requestedType) {
+      baseConditions.push('r.request_type = ?');
+      baseParams.push(requestedType);
     }
     if (keyword) {
       const fuzzyKeyword = `%${keyword}%`;
@@ -470,7 +566,7 @@ router.get('/', async (req, res, next) => {
                   AND newer_addition.request_type = 'additional_test' AND newer_addition.status = 'approved'
                   AND newer_addition.applied_at IS NOT NULL AND newer_addition.applied_at > f.created_at
               )) AS pdf_generated,
-              ${urgencySql} AS order_urgency_type,
+              ${urgencySql} AS order_urgency_type, r.submitted_payload,
               r.created_at, r.submitted_at, r.reviewed_at, r.withdrawn_at, r.updated_at
        FROM order_requests r
        JOIN users applicant ON applicant.user_id = r.applicant_user_id
@@ -485,9 +581,14 @@ router.get('/', async (req, res, next) => {
        ${limitSql}`,
       listParams
     );
-    const items = await attachCurrentOrderPdfs(
-      rows.map((row) => ({ ...row, request_no: requestNumber(row.request_id) }))
-    );
+    const items = await attachCurrentOrderPdfs(rows.map((row) => {
+      const { submitted_payload: submittedPayload, ...listRow } = row;
+      return {
+        ...listRow,
+        ...requestArrivalSummary(submittedPayload),
+        request_no: requestNumber(row.request_id)
+      };
+    }));
     if (!paginationRequested) return res.json(items);
 
     const [[totalRows], [statusRows]] = await Promise.all([
@@ -525,12 +626,16 @@ router.post('/', requireSales, async (req, res, next) => {
     if (!commissionData || !Array.isArray(commissionData.testItems)) {
       return res.status(400).json({ message: '申请内容格式不正确' });
     }
+    const arrivalValidationMessage = validateBusinessTestItemArrival(commissionData.testItems);
+    if (arrivalValidationMessage) return res.status(400).json({ message: arrivalValidationMessage });
     if (!templateData) return res.status(400).json({ message: '缺少委托单模板数据' });
     if (!await commissionerSignatureExists(commissionData.commissionerId)) {
       return res.status(409).json({ message: '该委托方尚未配置电子签名，请先上传签名后再提交' });
     }
+    syncCommissionerSignatureMetadata(requestPayload);
     const salesperson = await syncRequestSalesperson(conn, requestPayload, { refreshSignatureDate: true });
     if (!salesperson) return res.status(400).json({ message: '所选付款方未绑定有效的服务方联系人，无法添加电子签名' });
+    if (!salesperson.signature_available) return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，请联系管理员处理' });
 
     await conn.beginTransaction();
     const [result] = await conn.query(
@@ -572,8 +677,15 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
     if (!requestPayload?.commissionData || !requestPayload?.templateData) {
       return res.status(400).json({ message: '申请内容格式不正确' });
     }
+    const arrivalValidationMessage = validateBusinessTestItemArrival(requestPayload.commissionData.testItems);
+    if (arrivalValidationMessage) return res.status(400).json({ message: arrivalValidationMessage });
+    if (!await commissionerSignatureExists(requestPayload.commissionData.commissionerId)) {
+      return res.status(409).json({ message: '该委托方电子签名不存在，请先上传签名后再提交' });
+    }
+    syncCommissionerSignatureMetadata(requestPayload);
     const salesperson = await syncRequestSalesperson(conn, requestPayload, { refreshSignatureDate: true });
     if (!salesperson) return res.status(400).json({ message: '所选付款方未绑定有效的服务方联系人，无法提交二次申请' });
+    if (!salesperson.signature_available) return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，请联系管理员处理' });
     await conn.beginTransaction();
     const [[source]] = await conn.query(
       `SELECT request_id, applicant_user_id, status, request_type, root_request_id,
@@ -603,6 +715,12 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
       order_num: targetOrderId
     };
     requestPayload.templateData = { ...(requestPayload.templateData || {}), order_num: targetOrderId };
+    await preserveOriginalApplicationSignatureDates(conn, requestPayload, targetOrderId);
+    if (requestType === 'modification') {
+      // 提交时保存 LIMS 修改前的正式项目，预览据此逐字段标记；父申请的业务快照
+      // 与正式项目可能天然不同，不能作为修改基线。
+      await setModificationBaselineTestItems(conn, requestPayload, targetOrderId);
+    }
     const [result] = await conn.query(
       `INSERT INTO order_requests
         (applicant_user_id, status, request_type, parent_request_id, root_request_id, target_order_id,
@@ -634,14 +752,22 @@ router.put('/:id', requireSales, async (req, res, next) => {
     if (!commissionData || !Array.isArray(commissionData.testItems)) {
       return res.status(400).json({ message: '申请内容格式不正确' });
     }
+    const arrivalValidationMessage = validateBusinessTestItemArrival(commissionData.testItems);
+    if (arrivalValidationMessage) return res.status(400).json({ message: arrivalValidationMessage });
     if (!templateData) return res.status(400).json({ message: '缺少委托单模板数据' });
     if (!Number.isInteger(expectedVersion)) return res.status(400).json({ message: '申请版本信息缺失，请刷新后重试' });
+    if (!await commissionerSignatureExists(commissionData.commissionerId)) {
+      return res.status(409).json({ message: '该委托方电子签名不存在，请先上传签名后再保存' });
+    }
+    syncCommissionerSignatureMetadata(requestPayload);
     const salesperson = await syncRequestSalesperson(conn, requestPayload, { refreshSignatureDate: true });
     if (!salesperson) return res.status(400).json({ message: '所选付款方未绑定有效的服务方联系人，无法更新电子签名' });
+    if (!salesperson.signature_available) return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，请联系管理员处理' });
 
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, applicant_user_id, status, version
+      `SELECT request_id, applicant_user_id, status, request_type, target_order_id, approved_order_id,
+              submitted_payload, version
        FROM order_requests
        WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
@@ -655,6 +781,17 @@ router.put('/:id', requireSales, async (req, res, next) => {
     }
     if (Number(row.version) !== expectedVersion) {
       throw Object.assign(new Error('申请内容已发生变化，请刷新后重新修改'), { status: 409 });
+    }
+    if (['modification', 'additional_test'].includes(row.request_type)) {
+      await preserveOriginalApplicationSignatureDates(conn, requestPayload, row.target_order_id || row.approved_order_id);
+    }
+    if (row.request_type === 'modification') {
+      await setModificationBaselineTestItems(
+        conn,
+        requestPayload,
+        row.target_order_id || row.approved_order_id,
+        parseJson(row.submitted_payload)
+      );
     }
 
     await conn.query(
@@ -822,7 +959,11 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
     const absolutePath = resolveUploadPath(row.stored_path);
     await fs.access(absolutePath);
     res.type(row.mime_type || 'application/octet-stream');
-    res.download(absolutePath, row.original_filename);
+    const downloadFilename = ['test_requirement', 'user_upload'].includes(row.file_type)
+      && (row.approved_order_id || row.target_order_id)
+      ? buildRequirementDownloadFilename(row.approved_order_id || row.target_order_id, row.original_filename)
+      : row.original_filename;
+    res.download(absolutePath, downloadFilename);
   } catch (error) {
     if (error.code === 'ENOENT') return res.status(404).json({ message: '附件文件不存在' });
     next(error);
@@ -909,7 +1050,8 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     if (!lockAcquired) return res.status(409).json({ message: '该委托单正在生成 PDF，请稍后刷新' });
 
     const [[baseRequest]] = await conn.query(
-      `SELECT request_id, applicant_user_id, reviewed_payload, submitted_payload, sample_flow_token
+      `SELECT request_id, applicant_user_id, reviewed_payload, submitted_payload, sample_flow_token,
+              DATE_FORMAT(submitted_at, '%Y-%m-%d') AS application_date
        FROM order_requests
        WHERE request_type = 'normal' AND approved_order_id = ? AND status = 'approved'
        ORDER BY request_id LIMIT 1`,
@@ -933,17 +1075,28 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
        ORDER BY applied_at, request_id`,
       [orderIdValue]
     );
+    const additionalTestsForPdf = additionalTestsAfterModification(
+      additionalTests,
+      latestModification?.reviewed_at
+    );
     const modificationPayload = parseJson(latestModification?.reviewed_payload) || parseJson(latestModification?.submitted_payload);
     const payload = modificationPayload || baseReviewedPayload || baseSubmittedPayload || {};
     const salesperson = await syncRequestSalesperson(conn, payload);
     if (!salesperson) return res.status(409).json({ message: '当前付款方未绑定有效的服务方联系人，无法生成带电子签名的 PDF' });
+    if (!await signatureExists(salesperson.user_id)) {
+      return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，无法生成 PDF' });
+    }
     const templateData = buildOrderRequestPdfTemplateData(
       modificationPayload || baseReviewedPayload,
       baseSubmittedPayload,
       orderIdValue,
-      additionalTests.map((item) => parseJson(item.reviewed_payload) || parseJson(item.submitted_payload) || {})
+      additionalTestsForPdf.map((item) => parseJson(item.reviewed_payload) || parseJson(item.submitted_payload) || {}),
+      baseRequest.application_date
     );
     if (!templateData) return res.status(400).json({ message: '申请中缺少委托单模板数据' });
+    if (!await commissionerSignatureExists(templateData.commissioner_id)) {
+      return res.status(409).json({ message: '委托方电子签名不存在，无法生成 PDF' });
+    }
     if (!Array.isArray(templateData.testItems) || !templateData.testItems.length) {
       return res.status(400).json({ message: '申请中缺少业务填写的检测项目快照，无法生成 PDF' });
     }
@@ -973,7 +1126,8 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       [orderIdValue, orderIdValue]
     );
     const pdfIsCurrent = currentPdf?.created_at
-      && new Date(currentPdf.created_at).getTime() >= latestChangeAt;
+      && new Date(currentPdf.created_at).getTime() >= latestChangeAt
+      && (!latestModification || String(currentPdf.stored_path || '').includes(MODIFICATION_PDF_STORAGE_REVISION));
     if (currentPdf && pdfIsCurrent) {
       const [[linkedFile]] = await conn.query(
         `SELECT COUNT(DISTINCT test_item_id) AS linked_count
@@ -1018,7 +1172,10 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     const relativeDir = path.join('order-requests', orderId);
     const absoluteDir = path.join(__dirname, '..', '..', 'uploads', relativeDir);
     await fs.mkdir(absoluteDir, { recursive: true });
-    const { storageBaseName, docxPath, pdfPath } = await nextVersionedPdfPaths(absoluteDir, baseName);
+    const storageNameSeed = latestModification
+      ? `${baseName}${MODIFICATION_PDF_STORAGE_REVISION}`
+      : baseName;
+    const { storageBaseName, docxPath, pdfPath } = await nextVersionedPdfPaths(absoluteDir, storageNameSeed);
     createdPaths.push(docxPath, pdfPath);
 
     const sampleFlowToken = baseRequest.sample_flow_token || row.sample_flow_token || `SF_${crypto.randomBytes(18).toString('base64url')}`;
@@ -1192,7 +1349,7 @@ router.get('/:id/flow-document', async (req, res, next) => {
     const items = await getOrderTestItemsForFlow(pool, orderId);
     const flowData = buildProcessTemplateData(packet, orderId, items);
     const buffer = await generateProcessTemplateBuffer(flowData);
-    const filename = buildFlowDocumentFilename(orderId, orderExists.commissioner_name, orderExists.contact_name);
+    const filename = buildFlowDocumentFilename(orderId);
     res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
     res.send(buffer);
@@ -1287,6 +1444,14 @@ router.get('/:id', async (req, res, next) => {
       [row.request_id, row.root_request_id, row.request_id, relatedOrderId || null, relatedOrderId || null, relatedOrderId || null]
     );
     row.related_request_ids = relatedRows.map((item) => item.request_id);
+    if (relatedOrderId) {
+      const originalSignatureMetadata = await getOriginalApplicationSignatureMetadata(pool, relatedOrderId);
+      if (originalSignatureMetadata) {
+        row.original_application_date = originalSignatureMetadata.applicationDate;
+        row.original_customer_signature_date = originalSignatureMetadata.customerDate;
+        row.original_sales_signature_date = originalSignatureMetadata.salesDate;
+      }
+    }
     row.submitted_payload = parseJson(row.submitted_payload);
     row.reviewed_payload = parseJson(row.reviewed_payload);
     row.reserved_order_id = extractReservedOrderId(row.reviewed_payload) || null;
@@ -1486,6 +1651,10 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
     const expectedVersion = Number(req.body?.version);
     if (!commissionData) return res.status(400).json({ message: '缺少正式开单内容' });
     if (!Number.isInteger(expectedVersion)) return res.status(400).json({ message: '申请版本信息缺失，请刷新后重试' });
+    if (!await commissionerSignatureExists(commissionData.commissionerId)) {
+      return res.status(409).json({ message: '委托方电子签名不存在，请先上传签名后再开单' });
+    }
+    syncCommissionerSignatureMetadata(reviewedPayload);
 
     await conn.beginTransaction();
     const [[row]] = await conn.query(
@@ -1524,6 +1693,9 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
     if (!salesperson) {
       throw Object.assign(new Error('所选付款方未绑定有效的服务方联系人，无法添加电子签名'), { status: 400 });
     }
+    if (!salesperson.signature_available) {
+      throw Object.assign(new Error('业务服务方电子签名不存在或文件格式不正确，无法开单'), { status: 409 });
+    }
     const result = row.request_type === 'additional_test'
       ? { orderNum: reservedOrderId, testItemIds: await appendOrderTestItems(conn, reservedOrderId, reviewedPayload, req.user.user_id) }
       : await createCommissionFromPayload(commissionData, {
@@ -1557,7 +1729,10 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
 module.exports = {
   router,
   buildFlowDocumentFilename,
+  buildRequirementDownloadFilename,
   reviewerOrderBySql,
+  requestArrivalSummary,
+  validateBusinessTestItemArrival,
   insertProjectFileLinks,
   linkExistingRequirementsToAddedTests
 };

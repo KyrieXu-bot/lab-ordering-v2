@@ -22,6 +22,7 @@ export default function SalesDashboard() {
   const [searchInput, setSearchInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [filter, setFilter] = useState('all')
+  const [requestTypeFilter, setRequestTypeFilter] = useState('all')
   const [previewRequestId, setPreviewRequestId] = useState(null)
   const [previewRelatedRequestIds, setPreviewRelatedRequestIds] = useState([])
   const [expandedGroups, setExpandedGroups] = useState({})
@@ -32,7 +33,14 @@ export default function SalesDashboard() {
   async function load(targetPage = page) {
     setLoading(true); setError('')
     try {
-      const { data } = await getOrderRequests({ page: targetPage, page_size: PAGE_SIZE, keyword: keyword || undefined, status: filter === 'all' ? undefined : filter, grouped: 1 })
+      const { data } = await getOrderRequests({
+        page: targetPage,
+        page_size: PAGE_SIZE,
+        keyword: keyword || undefined,
+        status: filter === 'all' ? undefined : filter,
+        request_type: requestTypeFilter === 'all' ? undefined : requestTypeFilter,
+        grouped: 1
+      })
       const items = Array.isArray(data) ? data : (data.items || [])
       setRows(items)
       setTotal(Array.isArray(data) ? items.length : Number(data.pagination?.total || 0))
@@ -49,10 +57,16 @@ export default function SalesDashboard() {
     }, 300)
     return () => window.clearTimeout(timer)
   }, [searchInput])
-  useEffect(() => { load(page) }, [page, keyword, filter])
+  useEffect(() => { load(page) }, [page, keyword, filter, requestTypeFilter])
 
   function changeFilter(nextFilter) {
     setFilter(nextFilter)
+    setPage(1)
+  }
+
+  function changeRequestTypeFilter(nextType) {
+    setRequestTypeFilter(nextType)
+    setExpandedGroups({})
     setPage(1)
   }
 
@@ -75,7 +89,9 @@ export default function SalesDashboard() {
     })
     return Array.from(map.values()).map((group) => {
       group.rows.sort((a, b) => Number(b.request_id) - Number(a.request_id))
-      group.latest = group.rows[0]
+      group.latest = requestTypeFilter === 'all'
+        ? group.rows[0]
+        : (group.rows.find(row => (row.request_type || 'normal') === requestTypeFilter) || group.rows[0])
       group.opening = [...group.rows].reverse().find(row => (row.request_type || 'normal') === 'normal') || group.latest
       group.source = group.rows.find(row => row.request_type !== 'additional_test' && row.status === 'approved' && Boolean(row.order_opened))
         || group.rows.find(row => (row.request_type || 'normal') === 'normal' && row.status === 'approved' && Boolean(row.order_opened))
@@ -86,7 +102,7 @@ export default function SalesDashboard() {
       group.pendingAdditionalTest = group.rows.some(row => row.request_type === 'additional_test' && row.status === 'submitted')
       return group
     })
-  }, [rows])
+  }, [rows, requestTypeFilter])
 
   function toggleGroup(key) { setExpandedGroups(prev => ({ ...prev, [key]: !prev[key] })) }
   function openGroupPreview(group) {
@@ -110,6 +126,7 @@ export default function SalesDashboard() {
             <div><h2>申请记录</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条</p></div>
             <div className="portal-card-tools">
               <label className="portal-search"><span>搜索</span><input type="search" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="申请编号 / 委托方 / 委托人 / 业务员 / 正式单号" /></label>
+              <label className="portal-select-filter"><span>申请类型</span><select value={requestTypeFilter} onChange={(event) => changeRequestTypeFilter(event.target.value)}><option value="all">全部</option><option value="normal">普通</option><option value="additional_test">加测</option><option value="modification">修改</option></select></label>
               <div className="portal-tabs">{[['all','全部'],['submitted','待审批'],['pending_open','待开单'],['opened','已开单'],['returned','已驳回'],['withdrawn','已撤回']].map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => changeFilter(key)}>{label}</button>)}</div>
             </div>
           </div>
@@ -154,8 +171,12 @@ export default function SalesDashboard() {
                     {expanded && <tr className="request-history-row"><td colSpan="10"><div className="request-history-list">
                       {group.rows.map(item => <div className="request-history-item" key={item.request_id}>
                         <span className={`request-type-pill type-${item.request_type || 'normal'}`}>{requestTypeText[item.request_type || 'normal']}</span>
-                        <strong className="portal-mono">{item.request_no}</strong><span>申请人：{item.applicant_name || '—'}</span><span>业务员：{item.salesperson_name || '—'}</span><span>{formatTime(item.submitted_at)}</span>
-                        <span className={`status-pill status-${item.display_status}`}>{statusText[item.display_status] || item.display_status}</span><span className="request-history-note" title={item.review_note || ''}>{item.review_note || '—'}</span>
+                        <strong className="portal-mono request-history-number">{item.request_no}</strong>
+                        <span className="request-history-person" title={item.applicant_name || ''}>申请人：{item.applicant_name || '—'}</span>
+                        <span className="request-history-person" title={item.salesperson_name || ''}>业务员：{item.salesperson_name || '—'}</span>
+                        <time className="request-history-time" dateTime={item.submitted_at || ''}>{formatTime(item.submitted_at)}</time>
+                        <span className={`status-pill request-history-status status-${item.display_status}`}>{statusText[item.display_status] || item.display_status}</span>
+                        <span className="request-history-note" title={item.review_note || ''}>{item.review_note || '—'}</span>
                         <div className="request-history-actions">
                           <RequestDownloadMenu pdfRow={item.attachment_file_id ? item : null} flowRow={group.flowRow} requirementRow={item} compact />
                           {['submitted','returned'].includes(item.status) && <button onClick={() => navigate(`/requests/${item.request_id}/edit`)}>修改申请</button>}

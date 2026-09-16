@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   normalizeUserId,
+  isPngBuffer,
   signaturePathForUser,
   syncRequestSalesperson
 } = require('./salesSignature');
@@ -12,6 +13,13 @@ test('电子签名路径只接受安全的 user_id', () => {
   assert.equal(normalizeUserId('../YW0001'), null);
   assert.equal(normalizeUserId('YW0001.png'), null);
   assert.match(signaturePathForUser('YW0001'), /electronic-signatures[\\/]YW0001\.png$/);
+});
+
+test('业务员签名只接受内容真实为 PNG 的文件', () => {
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)]);
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20)]);
+  assert.equal(isPngBuffer(png), true);
+  assert.equal(isPngBuffer(jpeg), false);
 });
 
 test('申请中的服务方和签名身份由 payer.owner_user_id 覆盖', async () => {

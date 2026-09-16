@@ -152,8 +152,19 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
 
   const view = useMemo(() => normalizePacket(packet, meta), [packet, meta])
   const previousView = useMemo(() => comparisonPacket ? normalizePacket(comparisonPacket, {}) : null, [comparisonPacket])
+  const savedModificationBaselineItems = useMemo(() => normalizeItems(
+    packet?.formSnapshot?.modificationBaselineTestItems
+  ), [packet])
   const requestType = meta?.request_type || meta?.requestType
-  const compareChanges = requestType === 'modification' && Boolean(previousView)
+  const compareChanges = requestType === 'modification'
+    && Boolean(previousView || savedModificationBaselineItems.length || officialOrderItems.length)
+  const previousTestItems = useMemo(() => {
+    if (savedModificationBaselineItems.length) return savedModificationBaselineItems
+    // 发起或编辑尚未审批的修改时，LIMS 正式项目就是精确的修改前基线。
+    // 对无基线的历史申请也优先避免拿业务原始快照误报整行修改。
+    if (officialOrderItems.length) return officialOrderItems
+    return previousView?.items || []
+  }, [officialOrderItems, previousView, savedModificationBaselineItems])
   const highlightAddedItems = requestType === 'additional_test'
   const aggregatedAdditionalItems = useMemo(() => aggregatedAdditionalPackets.flatMap((entry) =>
     normalizePacket(entry.packet, {}).items.map((item) => ({ ...item, traceTime: entry.submittedAt, traceApplied: Boolean(entry.appliedAt) }))
@@ -311,7 +322,21 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
               <Section title="检测要求附录" english="Testing Requirements Appendix">
                 <div className="snapshot-table-overflow"><table className="snapshot-table appendix-table"><thead><tr>
                   <th>序号<br/><small>No.</small></th><th>★样品名称<br/><small>Sample Name</small></th><th>★材质<br/><small>Material</small></th><th>★样品型态<br/><small>Sample State</small></th><th>样品原号<br/><small>Sample No.</small></th><th>★检测项目<br/><small>Test Items</small></th><th>★检测标准<br/><small>Methods</small></th><th>★数量<br/><small>Qty</small></th><th>备注<br/><small>Remarks</small></th>
-                </tr></thead><tbody>{previewItems.length ? previewItems.map((item, index) => <tr className={item.previewAdded ? 'snapshot-added-item' : ''} key={index}><td>{index + 1}</td><td>{item.sampleName}</td><td>{item.material}</td><td>{item.sampleType}</td><td>{item.originalNo}</td><td className="snapshot-multiline-value">{item.testItem}</td><td>{item.method}</td><td>{item.quantity}</td><td className="snapshot-multiline-value">{item.note}{item.previewAdded && <span className="snapshot-trace-annotation">加测 · {formatTraceTime(item.traceTime || meta?.submitted_at || meta?.submittedAt)}</span>}</td></tr>) : <tr><td>1</td><td/><td/><td/><td/><td/><td/><td/><td/></tr>}</tbody></table></div>
+                </tr></thead><tbody>{previewItems.length ? previewItems.map((item, index) => {
+                  const previousItem = previousItemFor(item, index, previousTestItems)
+                  const compareItem = compareChanges && !item.previewAdded
+                  return <tr className={item.previewAdded ? 'snapshot-added-item' : ''} key={item.testItemId || index}>
+                    <td>{index + 1}</td>
+                    <td><ChangedText value={item.sampleName} previous={previousItem?.sampleName} compare={compareItem}/></td>
+                    <td><ChangedText value={item.material} previous={previousItem?.material} compare={compareItem}/></td>
+                    <td><ChangedText value={item.sampleType} previous={previousItem?.sampleType} compare={compareItem}/></td>
+                    <td><ChangedText value={item.originalNo} previous={previousItem?.originalNo} compare={compareItem}/></td>
+                    <td className="snapshot-multiline-value"><ChangedText value={item.testItem} previous={previousItem?.testItem} compare={compareItem}/></td>
+                    <td><ChangedText value={item.method} previous={previousItem?.method} compare={compareItem}/></td>
+                    <td><ChangedText value={item.quantity} previous={previousItem?.quantity} compare={compareItem}/></td>
+                    <td className="snapshot-multiline-value"><ChangedText value={item.note} previous={previousItem?.note} compare={compareItem}/>{item.previewAdded && <span className="snapshot-trace-annotation">加测 · {formatTraceTime(item.traceTime || meta?.submitted_at || meta?.submittedAt)}</span>}</td>
+                  </tr>
+                }) : <tr><td>1</td><td/><td/><td/><td/><td/><td/><td/><td/></tr>}</tbody></table></div>
                 <table className="snapshot-table"><tbody><tr><th>其他要求 <small>Other Requirements</small>：</th><td><ChangedText value={view.otherRequirements} previous={previousView?.otherRequirements} compare={compareChanges}/></td></tr></tbody></table>
                 <div className="snapshot-notes"><strong>注 Notes：</strong><ol><li>默认不出具评判结论。</li><li>未指明测试标准及年代号时，默认接受服务方推荐的方法及最新标准。</li><li><Choice checked={view.subcontractingNotAccepted} previousChecked={previousView?.subcontractingNotAccepted} compare={compareChanges}>不接受分包 Subcontracting is not accepted</Choice>；未勾选视为接受分包。</li><li>其他测试要求请在“其他要求”中写明。</li></ol></div>
               </Section>
@@ -390,6 +415,7 @@ function normalizePacket(packet = {}, meta = {}) {
 
 function normalizeItems(sourceItems) {
   return asArray(sourceItems).map((item) => ({
+    testItemId: item.test_item_id ?? item.testItemId ?? null,
     sampleName: text(item.sampleName ?? item.sample_name),
     material: text(item.material),
     sampleType: sampleTypeText(item.sampleType ?? item.sample_type, item.sampleTypeCustom ?? item.sample_type_custom),
@@ -400,6 +426,15 @@ function normalizeItems(sourceItems) {
     note: text(item.note ?? item.remarks),
     isAddOn: item.is_add_on === true || Number(item.is_add_on ?? item.isAddOn) === 1
   }))
+}
+
+function previousItemFor(item, index, previousItems) {
+  const items = asArray(previousItems)
+  if (item?.testItemId !== null && item?.testItemId !== undefined) {
+    const matchingItem = items.find((candidate) => String(candidate.testItemId ?? '') === String(item.testItemId))
+    if (matchingItem) return matchingItem
+  }
+  return items[index] || null
 }
 
 function itemFingerprint(item = {}) {

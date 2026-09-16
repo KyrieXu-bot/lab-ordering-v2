@@ -23,9 +23,7 @@ function responseFilename(response) {
 
 function flowFallbackName(flowRow) {
   const orderId = flowRow?.approved_order_id || '委托单'
-  const commissionerName = flowRow?.customer_name || '委托方'
-  const contactName = flowRow?.commissioner_contact_name || '联系人'
-  return `${orderId}-${commissionerName}-${contactName}.docx`
+  return `${orderId}-流转单.docx`
 }
 
 export default function RequestDownloadMenu({ pdfRow, flowRow, requirementRow, compact = false }) {

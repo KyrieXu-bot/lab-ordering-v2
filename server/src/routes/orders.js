@@ -54,12 +54,12 @@ router.post('/', async (req, res, next) => {
         `INSERT INTO test_items
          (order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-          sample_name, material, sample_type, original_no, sample_preparation, note,
+          sample_name, material, sample_type, original_no, sample_preparation, note, business_note,
           arrival_mode, sample_arrival_status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
          quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-         ti.sample_name || null, ti.material || null, ti.sample_type || null, ti.original_no || null, ti.sample_preparation || null, ti.note || null,
+         ti.sample_name || null, ti.material || null, ti.sample_type || null, ti.original_no || null, ti.sample_preparation || null, ti.note || null, ti.flow_note || null,
          (ti.arrival_mode === 'mail' ? 'delivery' : (ti.arrival_mode || null)),
          (ti.sample_arrival_status === 'not_arrived' || ti.sample_arrival_status === 'arrived') ? ti.sample_arrival_status : 'arrived']
       );

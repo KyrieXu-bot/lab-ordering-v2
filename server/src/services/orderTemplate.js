@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
 const { signaturePathForUser } = require('./salesSignature');
+const { commissionerSignaturePath } = require('./commissionerSignature');
 
 const templatePath = path.join(__dirname, '..', '..', 'templates', 'order_template_2026.docx');
 
@@ -58,12 +59,12 @@ function drawingRun(relationshipId, drawingId, cx, cy, description) {
   return `<w:r><w:rPr><w:position w:val="-3"/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${drawingId}" name="Electronic signature ${drawingId}" descr="${escapeXml(description)}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="electronic-signature.png" descr="${escapeXml(description)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relationshipId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
-async function injectRepresentativeSignature(zip, templateData) {
+async function injectSignatureAtMarker(zip, options) {
   const documentPart = zip.file('word/document.xml');
   if (!documentPart) throw new Error('委托单模板缺少 word/document.xml');
   let documentXml = documentPart.asText();
-  const markerIndex = documentXml.indexOf('Representative/Date:');
-  if (markerIndex < 0) throw new Error('委托单模板缺少 Representative/Date 签名区域');
+  const markerIndex = documentXml.indexOf(options.marker);
+  if (markerIndex < 0) throw new Error(`委托单模板缺少 ${options.marker} 签名区域`);
   const paragraphStart = documentXml.lastIndexOf('<w:p ', markerIndex);
   const paragraphEnd = documentXml.indexOf('</w:p>', markerIndex);
   if (paragraphStart < 0 || paragraphEnd < 0) throw new Error('无法定位委托单签名段落');
@@ -74,10 +75,10 @@ async function injectRepresentativeSignature(zip, templateData) {
     ''
   );
 
-  const userId = String(templateData?.sales_user_id || '').trim();
-  const representativeName = String(templateData?.sales_name || userId || '').trim();
-  const signatureDate = String(templateData?.sales_signature_date || '').trim();
-  const signaturePath = signaturePathForUser(userId);
+  const signerId = String(options.signerId || '').trim();
+  const signerName = String(options.signerName || signerId || '').trim();
+  const signatureDate = String(options.signatureDate || '').trim();
+  const signaturePath = options.signaturePath || null;
   let signatureBuffer = null;
   if (signaturePath) {
     try {
@@ -94,8 +95,8 @@ async function injectRepresentativeSignature(zip, templateData) {
     if (!relsPart) throw new Error('委托单模板缺少 document.xml.rels');
     let relsXml = relsPart.asText();
     const relationshipId = nextRelationshipId(relsXml);
-    const safeUserId = userId.replace(/[^A-Za-z0-9_-]/g, '_');
-    const mediaFilename = `electronic-signature-${safeUserId}.png`;
+    const safeSignerId = signerId.replace(/[^A-Za-z0-9_-]/g, '_');
+    const mediaFilename = `${options.mediaPrefix || 'electronic-signature'}-${safeSignerId}.png`;
     relsXml = relsXml.replace(
       '</Relationships>',
       `<Relationship Id="${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${mediaFilename}"/></Relationships>`
@@ -119,10 +120,11 @@ async function injectRepresentativeSignature(zip, templateData) {
       nextDrawingId(documentXml),
       cx,
       cy,
-      `${representativeName || userId}的电子签名`
+      options.description || `${signerName || signerId}的电子签名`
     );
   } else {
-    signatureContent = textRun(representativeName ? ` ${representativeName} ` : '                    ', { underline: true });
+    const fallbackName = options.showNameFallback ? signerName : '';
+    signatureContent = textRun(fallbackName ? ` ${fallbackName} ` : '                    ', { underline: true });
   }
 
   const dateContent = signatureDate ? textRun(`  ${signatureDate}`) : '';
@@ -131,19 +133,58 @@ async function injectRepresentativeSignature(zip, templateData) {
   zip.file('word/document.xml', documentXml);
 }
 
+async function injectCommissionerSignature(zip, templateData) {
+  const commissionerId = String(templateData?.commissioner_id || '').trim();
+  return injectSignatureAtMarker(zip, {
+    marker: 'Authorized Signature/Date',
+    signerId: commissionerId,
+    signerName: templateData?.customer_contactName || templateData?.customer_name || '',
+    signatureDate: templateData?.customer_signature_date || '',
+    signaturePath: commissionerSignaturePath(commissionerId),
+    mediaPrefix: 'commissioner-signature',
+    description: `${templateData?.customer_name || commissionerId || '委托方'}的电子签名`,
+    showNameFallback: false
+  });
+}
+
+async function injectRepresentativeSignature(zip, templateData) {
+  const userId = String(templateData?.sales_user_id || '').trim();
+  return injectSignatureAtMarker(zip, {
+    marker: 'Representative/Date:',
+    signerId: userId,
+    signerName: templateData?.sales_name || userId,
+    signatureDate: templateData?.sales_signature_date || '',
+    signaturePath: signaturePathForUser(userId),
+    mediaPrefix: 'electronic-signature',
+    description: `${templateData?.sales_name || userId || '评审人'}的电子签名`,
+    showNameFallback: true
+  });
+}
+
 async function generateOrderTemplateBuffer(templateData) {
   const templateBuffer = await fs.readFile(templatePath);
   if (!templateBuffer.length) throw new Error('委托单模板文件为空');
   const zip = new PizZip(templateBuffer);
-  const doc = new Docxtemplater(zip);
+  const doc = new Docxtemplater(zip, {
+    paragraphLoop: true,
+    linebreaks: true
+  });
   const renderData = {
     ...templateData,
     // 2026 版正式模板采用 commissioner_name；保留旧字段可兼容现有前端和历史申请 JSON。
     commissioner_name: templateData?.commissioner_name || templateData?.customer_name || ''
   };
   doc.render(renderData);
+  await injectCommissionerSignature(doc.getZip(), renderData);
   await injectRepresentativeSignature(doc.getZip(), renderData);
   return doc.getZip().generate({ type: 'nodebuffer' });
 }
 
-module.exports = { generateOrderTemplateBuffer, injectRepresentativeSignature, readPngSize, templatePath };
+module.exports = {
+  generateOrderTemplateBuffer,
+  injectSignatureAtMarker,
+  injectCommissionerSignature,
+  injectRepresentativeSignature,
+  readPngSize,
+  templatePath
+};

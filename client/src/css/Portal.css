@@ -64,6 +64,9 @@ button, input { font: inherit; }
 .portal-search input { width:260px; height:34px; padding:0 11px; border:1px solid #d7ddd9; border-radius:8px; background:#fff; color:#35413c; outline:none; font-size:12px; transition:border-color .16s ease,box-shadow .16s ease; }
 .portal-search input::placeholder { color:#9aa39f; font-weight:400; }
 .portal-search input:focus { border-color:#6f8b7f; box-shadow:0 0 0 3px rgba(73,100,90,.1); }
+.portal-select-filter { display:flex;align-items:center;gap:8px;color:#6d7973;font-size:12px;font-weight:700;white-space:nowrap; }
+.portal-select-filter select { width:112px;height:34px;padding:0 30px 0 10px;border:1px solid #d7ddd9;border-radius:8px;background:#fff;color:#35413c;outline:none;cursor:pointer;font-size:12px; }
+.portal-select-filter select:focus { border-color:#6f8b7f;box-shadow:0 0 0 3px rgba(73,100,90,.1); }
 .portal-table-wrap { overflow-x:auto; }
 .portal-table-scroll { height:620px; overflow:auto; scrollbar-gutter:stable; border:1px solid #ebe8e1; border-radius:10px; background:#fff; }
 .portal-table-scroll .portal-table { min-width:1040px; }
@@ -132,9 +135,12 @@ button, input { font: inherit; }
 .text-detail-modal header button { width:32px;height:32px;padding:0;border:0;border-radius:8px;background:#f1f2ef;color:#6f7974;cursor:pointer;font-size:22px;line-height:1; }
 .text-detail-content { max-height:45vh;margin:20px 0;padding:16px!important;overflow:auto;border:1px solid #e1e4e1;border-radius:10px;background:#f8f8f5;color:#3f4b46;line-height:1.75;overflow-wrap:anywhere;white-space:pre-wrap; }
 .text-detail-close { display:block;width:110px;height:40px;margin-left:auto;border:0;border-radius:8px;background:#49645a;color:#fff;cursor:pointer;font-weight:700; }
-.request-history-item { display:grid;grid-template-columns:62px 125px minmax(155px,.8fr) 80px minmax(130px,1fr) auto;gap:12px;align-items:center;padding:9px 12px!important;background:#fff;color:#5c6762;font-size:12px; }
+.request-history-item { display:grid;grid-template-columns:62px 125px minmax(130px,.9fr) minmax(130px,.9fr) 150px 82px minmax(100px,1fr) max-content;column-gap:16px;align-items:center;min-height:50px;padding:9px 12px!important;background:#fff;color:#5c6762;font-size:12px; }
+.request-history-item>* { min-width:0; }
+.request-history-number,.request-history-person,.request-history-time { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.request-history-status { justify-self:start; }
 .request-history-note { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#806a62; }
-.request-history-actions { display:flex;justify-content:flex-start;gap:6px;padding:0!important; }
+.request-history-actions { display:flex;justify-self:end;justify-content:flex-end;gap:6px;padding:0!important;white-space:nowrap; }
 .request-history-actions button { width:72px;height:32px;padding:0 8px;border:1px solid #ccd5d1;border-radius:7px;background:#fff;color:#49645a;cursor:pointer;font-size:12px;line-height:30px;text-align:center; }
 .request-history-actions button.danger { color:#9b5149;border-color:#e1c5c1; }
 .request-download-menu { position:relative; display:inline-block; vertical-align:middle; padding:0!important; }
@@ -210,6 +216,6 @@ button, input { font: inherit; }
 .login-form button { width:100%; height:48px; margin-top:5px; border:0; border-radius:9px; background:#49645a; color:white; font-size:14px; font-weight:700; cursor:pointer; }.login-form button:disabled{opacity:.55;cursor:not-allowed}
 .login-aside { margin:18px; border-radius:20px; background:linear-gradient(145deg,rgba(37,57,50,.2),rgba(37,57,50,.75)), url('/JITRI-logo3.png') center/45% no-repeat, #526a61; display:flex; align-items:flex-end; padding:70px!important;color:white; overflow:hidden; }
 .login-aside span{color:#d6e0dc;font-size:12px;letter-spacing:.12em}.login-aside h2{color:white;text-align:left;font:500 clamp(34px,4vw,58px)/1.35 Georgia,"Microsoft YaHei",serif;margin:16px 0 0}
-@media(max-width:800px){.login-page{grid-template-columns:1fr}.login-aside{display:none}.portal-header{padding:0 18px}.portal-account>span:first-child{display:none}.portal-main,.portal-main-wide{width:calc(100% - 24px);padding-top:24px}.portal-main-dashboard{height:calc(100vh - 72px);padding:12px 0}.portal-dashboard{grid-template-rows:150px minmax(0,1fr);gap:12px}.portal-dashboard .portal-hero{height:150px;min-height:0;padding:18px}.portal-dashboard .portal-card{padding:14px!important}.portal-hero{padding:28px 22px;min-height:190px}.portal-hero h1{font-size:29px}.portal-primary{align-self:flex-end}.portal-card{padding:18px!important}.portal-card-heading{align-items:flex-start;gap:14px;flex-direction:column}.portal-card-tools,.portal-search{width:100%}.portal-card-tools{justify-content:flex-start}.portal-search input{width:auto;min-width:0;flex:1}.portal-table-scroll{height:520px}.portal-dashboard .portal-table-scroll{height:auto}.portal-pagination{align-items:flex-start;flex-direction:column}.detail-grid{grid-template-columns:1fr}.portal-tabs{overflow:auto;width:100%}}
+@media(max-width:800px){.login-page{grid-template-columns:1fr}.login-aside{display:none}.portal-header{padding:0 18px}.portal-account>span:first-child{display:none}.portal-main,.portal-main-wide{width:calc(100% - 24px);padding-top:24px}.portal-main-dashboard{height:calc(100vh - 72px);padding:12px 0}.portal-dashboard{grid-template-rows:150px minmax(0,1fr);gap:12px}.portal-dashboard .portal-hero{height:150px;min-height:0;padding:18px}.portal-dashboard .portal-card{padding:14px!important}.portal-hero{padding:28px 22px;min-height:190px}.portal-hero h1{font-size:29px}.portal-primary{align-self:flex-end}.portal-card{padding:18px!important}.portal-card-heading{align-items:flex-start;gap:14px;flex-direction:column}.portal-card-tools,.portal-search,.portal-select-filter{width:100%}.portal-card-tools{justify-content:flex-start}.portal-search input{width:auto;min-width:0;flex:1}.portal-select-filter select{flex:1;width:auto}.portal-table-scroll{height:520px}.portal-dashboard .portal-table-scroll{height:auto}.portal-pagination{align-items:flex-start;flex-direction:column}.detail-grid{grid-template-columns:1fr}.portal-tabs{overflow:auto;width:100%}}
 
 @media(max-width:800px){.portal-card-tools{align-items:stretch;flex-direction:column}.portal-tabs{flex:0 0 auto}}

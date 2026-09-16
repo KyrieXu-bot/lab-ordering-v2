@@ -15,6 +15,7 @@ export default function ReviewerDashboard() {
   const navigate = useNavigate()
   const [rows, setRows] = useState([])
   const [filter, setFilter] = useState('all')
+  const [requestTypeFilter, setRequestTypeFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
@@ -47,6 +48,7 @@ export default function ReviewerDashboard() {
     setError('')
     const params = { page, page_size: PAGE_SIZE }
     if (filter !== 'all') params.status = filter
+    if (requestTypeFilter !== 'all') params.request_type = requestTypeFilter
     if (keyword) params.keyword = keyword
     getOrderRequests(params)
       .then(({ data }) => {
@@ -59,11 +61,16 @@ export default function ReviewerDashboard() {
       })
       .catch((requestError) => setError(requestError.response?.data?.message || '申请列表加载失败'))
       .finally(() => setLoading(false))
-  }, [filter, page, keyword, refreshKey])
+  }, [filter, requestTypeFilter, page, keyword, refreshKey])
   const pending = Number(counts.submitted || 0)
 
   function changeFilter(nextFilter) {
     setFilter(nextFilter)
+    setPage(1)
+  }
+
+  function changeRequestTypeFilter(nextType) {
+    setRequestTypeFilter(nextType)
     setPage(1)
   }
 
@@ -163,6 +170,7 @@ export default function ReviewerDashboard() {
             <div><h2>申请队列</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条；未生成正式单号的申请在前，其余按正式单号升序</p></div>
             <div className="portal-card-tools">
               <label className="portal-search"><span>搜索</span><input type="search" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="申请编号 / 委托方 / 委托人 / 业务员 / 正式单号" /></label>
+              <label className="portal-select-filter"><span>申请类型</span><select value={requestTypeFilter} onChange={(event) => changeRequestTypeFilter(event.target.value)}><option value="all">全部</option><option value="normal">普通</option><option value="additional_test">加测</option><option value="modification">修改</option></select></label>
               <div className="portal-tabs">{[['all','全部'],['submitted','待审批'],['pending_open','待开单'],['opened','已开单'],['returned','已驳回'],['withdrawn','已撤回']].map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => changeFilter(key)}>{label}</button>)}</div>
             </div>
           </div>

@@ -1,6 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createDirectOrderRequest } = require('./commission');
+const { createDirectOrderRequest, parseJsonObject } = require('./commission');
+
+test('LIMS 预填可以读取 JSON 对象格式的退回地址', () => {
+  const expected = { returnAddressOption: 'other', returnAddress: '苏州市测试地址' };
+  assert.deepEqual(parseJsonObject(JSON.stringify(expected)), expected);
+  assert.deepEqual(parseJsonObject(expected), expected);
+  assert.equal(parseJsonObject('[1,2]'), null);
+  assert.equal(parseJsonObject('invalid json'), null);
+});
 
 test('开单员自行开单同步生成马婷名下的普通已开单申请快照', async () => {
   const calls = [];

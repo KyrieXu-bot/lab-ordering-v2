@@ -28,8 +28,7 @@ async function commissionerSignatureExists(commissionerId) {
   const signaturePath = commissionerSignaturePath(commissionerId);
   if (!signaturePath) return false;
   try {
-    await fs.access(signaturePath);
-    return true;
+    return isPngBuffer(await fs.readFile(signaturePath));
   } catch (_) {
     return false;
   }

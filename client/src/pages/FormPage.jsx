@@ -46,6 +46,13 @@ function buildOrderUrgencySymbols(value = 'normal') {
   };
 }
 
+function extractIntegerQuantity(value) {
+  const match = String(value ?? '').normalize('NFKC').match(/\d+(?:\.\d+)?/);
+  if (!match) return '';
+  const quantity = Math.trunc(Number(match[0]));
+  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : '';
+}
+
 function buildRequestTemplateData(commissionData, context) {
   const { selectedCustomer, selectedPayer, salesUserId, salesName, salesEmail, salesPhone, salesSignatureDate } = context;
   const sampleTypeMap = { 1: '板材', 2: '棒材', 3: '粉末', 4: '液体', 5: '其他' };
@@ -266,6 +273,15 @@ async function apiErrorMessage(error, fallback) {
   return responseData?.message || fallback;
 }
 
+function responseFilename(response, fallbackName) {
+  const disposition = response?.headers?.['content-disposition'] || '';
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (utf8Name) {
+    try { return decodeURIComponent(utf8Name); } catch (_) { return utf8Name; }
+  }
+  return disposition.match(/filename="?([^";]+)"?/i)?.[1] || fallbackName;
+}
+
 function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [showPrefillModal, setShowPrefillModal] = useState(false);
@@ -331,6 +347,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const isSalesRequestMode = ['request', 'edit', 'change', 'additionalTest'].includes(workflowMode);
   const requiresCompleteSignatures = workflowMode === 'direct' || isSalesRequestMode;
   const [businessTestItemsSnapshot, setBusinessTestItemsSnapshot] = useState([]);
+  const [modificationBaselineTestItems, setModificationBaselineTestItems] = useState([]);
   const [requestAttachments, setRequestAttachments] = useState([]);
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [attachmentActionId, setAttachmentActionId] = useState(null);
@@ -467,6 +484,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         const storedBusinessItems = Array.isArray(snapshot.businessTestItems)
           ? snapshot.businessTestItems
           : (!data.reviewed_payload && Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
+        const storedModificationBaseline = Array.isArray(snapshot.modificationBaselineTestItems)
+          ? snapshot.modificationBaselineTestItems
+          : [];
         const reviewerPrefillItems = storedBusinessItems.map((item) => ({
           sampleName: item.sampleName ?? item.sample_name ?? '',
           material: item.material ?? '',
@@ -483,7 +503,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           seq_no: '',
           service_urgency: '',
           sample_preparation: '',
-          quantity: item.quantity ?? '',
+          quantity: extractIntegerQuantity(item.quantity),
           department_id: '',
           note: item.note ?? item.remarks ?? '',
           flow_note: '',
@@ -495,6 +515,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           _businessPrefill: true
         }));
         setBusinessTestItemsSnapshot(storedBusinessItems);
+        setModificationBaselineTestItems(loadingModificationItems
+          ? (storedModificationBaseline.length ? storedModificationBaseline : existingOfficialItems)
+          : []);
         if (snapshot.formData) {
           const separateBusinessItems = workflowMode === 'review' || workflowMode === 'view';
           let officialItems = data.reviewed_payload && Array.isArray(snapshot.formData.testItems)
@@ -1203,6 +1226,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       return {
         ...prev,
         reportType: updated,
+        reportHeader: code === 1 && checked ? '' : prev.reportHeader,
+        reportHeaderAdditionalInfo: code === 1 && checked ? '' : prev.reportHeaderAdditionalInfo,
+        reportForm: code === 1 && checked ? '' : prev.reportForm,
         showPaperReport: updated.includes(5),
         paperReportShippingType: updated.includes(5) ? prev.paperReportShippingType : '',
         reportAdditionalInfo: updated.includes(5) ? prev.reportAdditionalInfo : ''
@@ -1348,7 +1374,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     try {
       const response = await downloadOrderRequestFile(attachment.ownerRequestId || requestId, attachment.file_id);
       const url = URL.createObjectURL(new Blob([response.data], { type: attachment.mime_type || 'application/octet-stream' }));
-      downloadFile(url, attachment.original_filename);
+      downloadFile(url, responseFilename(response, attachment.original_filename));
       URL.revokeObjectURL(url);
     } catch (error) {
       if (error.response?.status === 404) {
@@ -1466,21 +1492,13 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       alert('提交失败！请填写其他寄送地址、收件人和电话'); return;
     }
     if (!hasNoReport && !formData.reportHeader) { alert('提交失败！报告抬头为必填项'); return; }
-    if (!hasNoReport && !formData.reportForm) { alert('提交失败！报告对应方式为必填项'); return; }
-    let businessMethodIndex = 0;
-    const submissionTestItems = workflowMode === 'review'
-      ? formData.testItems.map((item) => {
-          if (item._locked) return item;
-          const businessItem = businessTestItemsSnapshot[businessMethodIndex++] || {};
-          return {
-            ...item,
-            test_method: businessItem.test_method ?? businessItem.testMethod ?? ''
-          };
-        })
-      : formData.testItems;
-    if (workflowMode === 'review') {
-      setFormData(prev => ({ ...prev, testItems: submissionTestItems }));
+    if (!hasNoReport && formData.reportHeader === '2' && !String(formData.reportHeaderAdditionalInfo || '').trim()) {
+      alert('提交失败！报告抬头选择“其他”时，请填写补充信息'); return;
     }
+    if (!hasNoReport && !formData.reportForm) { alert('提交失败！报告对应方式为必填项'); return; }
+    // 正式录入可能会在业务申请项目之外新增项目行；提交时应保留开单员实际录入的
+    // 检测标准。业务申请中的标准只用于页面初始化，不能再按行号覆盖正式项目。
+    const submissionTestItems = formData.testItems;
 
     if (submissionTestItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
     if (isAdditionalTestWorkflow && !submissionTestItems.some(item => !item._locked)) {
@@ -1496,6 +1514,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         if (!String(ti.sampleType || '').trim()) { alert(`提交失败！第${i + 1}行：样品类型为必填项`); return; }
         if (!String(ti.test_item || '').trim()) { alert(`提交失败！第${i + 1}行：检测项目为必填项`); return; }
         if (!String(ti.test_method || '').trim()) { alert(`提交失败！第${i + 1}行：检测标准为必填项`); return; }
+        if (!String(ti.arrival_mode || '').trim()) { alert(`提交失败！第${i + 1}行：到达方式为必填项`); return; }
+        if (!String(ti.sample_arrival_status || '').trim()) { alert(`提交失败！第${i + 1}行：是否到达为必填项`); return; }
         if (!String(ti.quantity || '').trim()) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
         continue;
       }
@@ -1513,6 +1533,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         return;
       }
       if (!ti.quantity) { alert(`提交失败！第${i + 1}行：数量为必填项`); return; }
+      if (!Number.isInteger(Number(ti.quantity)) || Number(ti.quantity) <= 0) { alert(`提交失败！第${i + 1}行：数量必须是大于 0 的整数`); return; }
       if (!ti.unit || String(ti.unit).trim() === '') { alert(`提交失败！第${i + 1}行：单位为必填项`); return; }
       if (!ti.department_id) { alert(`提交失败！第${i + 1}行：部门为必填项`); return; }
       if (!ti.arrival_mode) { alert(`提交失败！第${i + 1}行：到达方式为必填项`); return; }
@@ -1526,6 +1547,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     if (!req.conductivity) { alert('提交失败！样品导电性为必填项，请选择'); return; }
     if (!req.breakable) { alert('提交失败！是否可破坏为必填项，请选择'); return; }
     if (!req.brittle) { alert('提交失败！是否孤品为必填项，请选择'); return; }
+
+    if (!formData.sampleSolutionType) {
+      alert('提交失败！余样处置为必填项，请选择');
+      return;
+    }
 
     if (formData.sampleSolutionType === '3') {
       if (!formData.sampleReturnInfo.returnAddressOption) {
@@ -1616,6 +1642,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       formSnapshot: {
         formData: isAdditionalTestWorkflow ? { ...formData, testItems: effectiveTestItems } : formData,
         businessTestItems: (isSalesRequestMode || workflowMode === 'direct') ? effectiveTestItems : businessTestItemsSnapshot,
+        ...(isModificationMode ? { modificationBaselineTestItems } : {}),
         selectedCustomer,
         selectedPayer,
         isTransferMode,
@@ -2527,8 +2554,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     <th className="sample-wide-col">样品原号</th>
                     <th className="business-test-name-col">检测项目<span style={{ color: 'red' }}>*</span></th>
                     <th>检测标准<span style={{ color: 'red' }}>*</span></th>
-                    <th className="business-choice-col">样品到达方式</th>
-                    <th className="business-choice-col">是否到样</th>
+                    <th className="business-choice-col">到达方式<span style={{ color: 'red' }}>*</span></th>
+                    <th className="business-choice-col">是否到达<span style={{ color: 'red' }}>*</span></th>
                     <th className="business-flow-note-col">流转备注</th>
                     <th>数量<span style={{ color: 'red' }}>*</span></th>
                     <th>备注</th>
@@ -2765,7 +2792,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     </select>
                   </td>
                   {workflowMode !== 'direct' && workflowMode !== 'review' && <td className="flow-note-col"><input type="text" value={item.flow_note || ''} onChange={e => handleTestItemChange(index, 'flow_note', e.target.value)} maxLength={500} placeholder="填写流转、前处理或顺序要求" /></td>}
-                  <td><input type="text" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 50 + 'px' }} /></td>
+                  <td><input type="number" min="1" step="1" value={item.quantity} onChange={(e) => handleTestItemChange(index, 'quantity', e.target.value)} style={{ width: 70 + 'px' }} /></td>
                   {item.price_id
                     ? <td className='selected-price'><span>{departments.find(dept => String(dept.department_id) === String(item.department_id))?.department_name || '未知部门'}</span></td>
                     : <td><select value={item.department_id || ""} onChange={e => handleDepartmentChange(index, e.target.value)}>
@@ -3028,7 +3055,18 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             ...pendingAttachments.filter((item) => item.kind === 'request_image')
           ]}
           packet={{
-            formSnapshot: { formData, businessTestItems: isAdditionalTestWorkflow ? formData.testItems.filter((item) => !item._locked) : formData.testItems, selectedCustomer, selectedPayer, orderMonthPreference, salesUserId, salesName, salesEmail, salesPhone },
+            formSnapshot: {
+              formData,
+              businessTestItems: isAdditionalTestWorkflow ? formData.testItems.filter((item) => !item._locked) : formData.testItems,
+              ...(isModificationMode ? { modificationBaselineTestItems } : {}),
+              selectedCustomer,
+              selectedPayer,
+              orderMonthPreference,
+              salesUserId,
+              salesName,
+              salesEmail,
+              salesPhone
+            },
             templateData: {
               sales_user_id: salesUserId,
               sales_name: salesName,
@@ -3039,7 +3077,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               customer_signature_date: salesSignatureDate || ''
             }
           }}
-          requestMeta={isAdditionalTestWorkflow ? { ...(requestMeta || {}), request_type: 'additional_test' } : requestMeta}
+          requestMeta={isModificationMode
+            ? { ...(requestMeta || {}), request_type: 'modification' }
+            : isAdditionalTestWorkflow
+              ? { ...(requestMeta || {}), request_type: 'additional_test' }
+              : requestMeta}
           commissionerSignatureUrl={commissionerSignatureUrl}
           salesSignatureUrl={salesSignatureUrl}
         />

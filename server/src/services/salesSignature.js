@@ -2,6 +2,11 @@ const path = require('path');
 const fs = require('fs').promises;
 
 const signaturesDirectory = path.resolve(__dirname, '..', '..', 'assets', 'electronic-signatures');
+const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function isPngBuffer(buffer) {
+  return Buffer.isBuffer(buffer) && buffer.length >= 24 && buffer.subarray(0, 8).equals(pngHeader);
+}
 
 function normalizeUserId(userId) {
   const normalized = String(userId || '').trim();
@@ -18,8 +23,7 @@ async function signatureExists(userId) {
   const signaturePath = signaturePathForUser(userId);
   if (!signaturePath) return false;
   try {
-    await fs.access(signaturePath);
-    return true;
+    return isPngBuffer(await fs.readFile(signaturePath));
   } catch (_) {
     return false;
   }
@@ -81,6 +85,7 @@ module.exports = {
   signaturesDirectory,
   normalizeUserId,
   signaturePathForUser,
+  isPngBuffer,
   signatureExists,
   getSalespersonByPayer,
   formatLocalDate,

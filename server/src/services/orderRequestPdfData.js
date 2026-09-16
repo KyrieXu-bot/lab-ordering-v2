@@ -43,18 +43,53 @@ function businessItemsFromSubmittedPayload(submittedPayload) {
     : [];
 }
 
-function buildOrderRequestPdfTemplateData(reviewedPayload, submittedPayload, orderId, additionalSubmittedPayloads = []) {
+function originalApplicationSignatureDates(submittedPayload, fallbackDate = '') {
+  const templateData = submittedPayload?.templateData || {};
+  const customerDate = templateData.customer_signature_date || templateData.sales_signature_date || fallbackDate || '';
+  const salesDate = templateData.sales_signature_date || templateData.customer_signature_date || fallbackDate || '';
+  return { customerDate, salesDate };
+}
+
+function buildOrderRequestPdfTemplateData(reviewedPayload, submittedPayload, orderId, additionalSubmittedPayloads = [], originalApplicationDate = '') {
   const currentTemplateData = reviewedPayload?.templateData || submittedPayload?.templateData;
   if (!currentTemplateData) return null;
+  const originalDates = originalApplicationSignatureDates(submittedPayload, originalApplicationDate);
+  // 普通申请仍以业务最初提交的检测项目为准；修改申请审批通过后，
+  // reviewedPayload 中保存的是本次修改后的完整业务快照，PDF 必须改用它。
+  const isModification = reviewedPayload?.workflow?.requestType === 'modification';
+  const currentBusinessItemsPayload = isModification ? reviewedPayload : submittedPayload;
   const testItems = [
-    ...businessItemsFromSubmittedPayload(submittedPayload),
+    ...businessItemsFromSubmittedPayload(currentBusinessItemsPayload),
     ...additionalSubmittedPayloads.flatMap((payload) => businessItemsFromSubmittedPayload(payload))
   ].map((item, index) => ({ ...item, idx: index + 1 }));
   return {
     ...currentTemplateData,
     order_num: orderId,
+    commissioner_id: currentTemplateData.commissioner_id
+      || reviewedPayload?.commissionData?.commissionerId
+      || submittedPayload?.commissionData?.commissionerId
+      || '',
+    customer_signature_date: originalDates.customerDate,
+    sales_signature_date: originalDates.salesDate,
     testItems
   };
 }
 
-module.exports = { buildOrderRequestPdfTemplateData, businessItemsFromSubmittedPayload };
+function additionalTestsAfterModification(additionalTests = [], modificationReviewedAt = null) {
+  if (!modificationReviewedAt) return additionalTests;
+  const cutoff = new Date(modificationReviewedAt).getTime();
+  if (!Number.isFinite(cutoff)) return additionalTests;
+  // 修改快照是审批时正式检测项目的完整快照，其中已包含此前完成录入的加测项。
+  // 这里只再追加修改审批后才完成录入的加测，避免 PDF 重复显示旧加测项目。
+  return additionalTests.filter((item) => {
+    const appliedAt = new Date(item?.applied_at).getTime();
+    return Number.isFinite(appliedAt) && appliedAt > cutoff;
+  });
+}
+
+module.exports = {
+  buildOrderRequestPdfTemplateData,
+  businessItemsFromSubmittedPayload,
+  originalApplicationSignatureDates,
+  additionalTestsAfterModification
+};

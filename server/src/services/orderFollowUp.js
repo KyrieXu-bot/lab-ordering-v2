@@ -1,5 +1,14 @@
+const { extractIntegerQuantity } = require('./testItemQuantity');
+
 function clean(value) {
   return value == null || String(value).trim() === '' ? null : value;
+}
+
+async function updateOrInsertByOrderId(conn, updateSql, updateParams, insertSql, insertParams) {
+  const [result] = await conn.query(updateSql, updateParams);
+  if (Number(result?.affectedRows || 0) === 0) {
+    await conn.query(insertSql, insertParams);
+  }
 }
 
 async function applyOrderModification(conn, orderId, payload) {
@@ -38,24 +47,37 @@ async function applyOrderModification(conn, orderId, payload) {
        header_other = VALUES(header_other), format_type = VALUES(format_type), report_seals = VALUES(report_seals)`,
     [orderId, JSON.stringify(report.type || []), clean(report.paper_report_shipping_type), clean(report.report_additional_info), clean(report.header_type), clean(report.header_other), clean(report.format_type), JSON.stringify(order.report_seals || [])]
   );
-  await conn.query(
-    `INSERT INTO sample_handling (order_id, handling_type, return_info)
-     VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE handling_type = VALUES(handling_type), return_info = VALUES(return_info)`,
-    [orderId, clean(handling.handling_type), handling.return_info ? JSON.stringify(handling.return_info) : null]
+  const handlingParams = [clean(handling.handling_type), handling.return_info ? JSON.stringify(handling.return_info) : null];
+  await updateOrInsertByOrderId(
+    conn,
+    `UPDATE sample_handling SET handling_type = ?, return_info = ? WHERE order_id = ?`,
+    [...handlingParams, orderId],
+    `INSERT INTO sample_handling (order_id, handling_type, return_info) VALUES (?, ?, ?)`,
+    [orderId, ...handlingParams]
   );
-  await conn.query(
-    `INSERT INTO sample_requirements (order_id, hazards, hazard_other, magnetism, conductivity, breakable, brittle)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE hazards = VALUES(hazards), hazard_other = VALUES(hazard_other),
-       magnetism = VALUES(magnetism), conductivity = VALUES(conductivity),
-       breakable = VALUES(breakable), brittle = VALUES(brittle)`,
-    [orderId, JSON.stringify(requirements.hazards || []), clean(requirements.hazardOther), clean(requirements.magnetism), clean(requirements.conductivity), clean(requirements.breakable), clean(requirements.brittle)]
+  const requirementParams = [
+    JSON.stringify(requirements.hazards || []), clean(requirements.hazardOther), clean(requirements.magnetism),
+    clean(requirements.conductivity), clean(requirements.breakable), clean(requirements.brittle)
+  ];
+  await updateOrInsertByOrderId(
+    conn,
+    `UPDATE sample_requirements
+     SET hazards = ?, hazard_other = ?, magnetism = ?, conductivity = ?, breakable = ?, brittle = ?
+     WHERE order_id = ?`,
+    [...requirementParams, orderId],
+    `INSERT INTO sample_requirements
+      (order_id, hazards, hazard_other, magnetism, conductivity, breakable, brittle)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [orderId, ...requirementParams]
   );
 
   const items = Array.isArray(commission.testItems) ? commission.testItems : [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+    const quantity = extractIntegerQuantity(item.quantity);
+    if (quantity == null) {
+      throw Object.assign(new Error(`第${index + 1}行检测项目的数量必须包含大于 0 的整数`), { status: 400 });
+    }
     const testItemId = Number(item.test_item_id);
     if (!Number.isInteger(testItemId) || testItemId <= 0) {
       throw Object.assign(new Error(`第${index + 1}行检测项目缺少正式项目标识，请刷新后重试`), { status: 409 });
@@ -72,11 +94,11 @@ async function applyOrderModification(conn, orderId, payload) {
     await conn.query(
       `UPDATE test_items
        SET sample_name = ?, material = ?, sample_type = ?, original_no = ?, standard_code = ?,
-           quantity = ?, note = ?, arrival_mode = ?, sample_arrival_status = ?
+           quantity = ?, note = ?, business_note = ?, arrival_mode = ?, sample_arrival_status = ?
        WHERE test_item_id = ? AND order_id = ?`,
       [
         clean(item.sample_name), clean(item.material), clean(item.sample_type), clean(item.original_no), clean(item.test_method),
-        Number(item.quantity) || 1, clean(item.note), item.arrival_mode === 'mail' ? 'delivery' : clean(item.arrival_mode),
+        quantity, clean(item.note), clean(item.flow_note), item.arrival_mode === 'mail' ? 'delivery' : clean(item.arrival_mode),
         ['arrived', 'not_arrived'].includes(item.sample_arrival_status) ? item.sample_arrival_status : 'not_arrived',
         testItemId, orderId
       ]
@@ -101,6 +123,10 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
   const insertedIds = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+    const quantity = extractIntegerQuantity(item.quantity);
+    if (quantity == null) {
+      throw Object.assign(new Error(`第${index + 1}行加测项目的数量必须包含大于 0 的整数`), { status: 400 });
+    }
     const unit = String(item.unit || '').trim();
     if (!unit) throw Object.assign(new Error(`第${index + 1}行加测项目缺少单位`), { status: 400 });
     const fullName = String(item.test_item || '').trim();
@@ -131,13 +157,13 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
       `INSERT INTO test_items
         (order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
          quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-         sample_name, material, sample_type, original_no, sample_preparation, note, price_note,
+         sample_name, material, sample_type, original_no, sample_preparation, note, business_note, price_note,
          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`, unit_mismatch_reviewed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`,
       [
         orderId, clean(item.price_id), categoryName, detailName, clean(item.test_code || price?.test_code), clean(item.test_method || price?.standard_code),
-        departmentId, groupId, Number(item.quantity) || 1, clean(price?.amount ?? item.unit_price), clean(item.discount_rate), price?.is_outsourced ? 1 : 0,
-        clean(item.seq_no), clean(item.sample_name), clean(item.material), clean(item.sample_type), clean(item.original_no), clean(item.sample_preparation), clean(item.note), clean(item.price_note),
+        departmentId, groupId, quantity, clean(price?.amount ?? item.unit_price), clean(item.discount_rate), price?.is_outsourced ? 1 : 0,
+        clean(item.seq_no), clean(item.sample_name), clean(item.material), clean(item.sample_type), clean(item.original_no), clean(item.sample_preparation), clean(item.note), clean(item.flow_note), clean(item.price_note),
         item.arrival_mode === 'mail' ? 'delivery' : clean(item.arrival_mode), ['arrived','not_arrived'].includes(item.sample_arrival_status) ? item.sample_arrival_status : 'arrived',
         item.service_urgency || 'normal', supervisorAccount, unit, price?.unit && String(price.unit).trim() !== unit ? 1 : 0
       ]
@@ -166,7 +192,7 @@ async function getOrderTestItemsForFlow(conn, orderId) {
     `SELECT ti.test_item_id, ti.sample_name, ti.material, ti.sample_type, ti.original_no,
             CONCAT_WS(' - ', NULLIF(ti.category_name, ''), NULLIF(ti.detail_name, '')) AS test_item,
             ti.standard_code AS test_method, ti.quantity, ti.department_id, ti.note,
-            ti.test_code, ti.seq_no, ti.service_urgency, ti.is_add_on
+            ti.test_code, ti.seq_no, ti.service_urgency, ti.business_note AS flow_note, ti.is_add_on
      FROM test_items ti
      WHERE ti.order_id = ?
      ORDER BY ti.test_item_id`,

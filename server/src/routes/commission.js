@@ -4,11 +4,13 @@ const path = require('path');
 const fs = require('fs').promises;
 const pool = require('../db');
 const { requireReviewer } = require('../middleware/auth');
-const { signatureExists } = require('../services/salesSignature');
+const { signatureExists, getSalespersonByPayer, formatLocalDate } = require('../services/salesSignature');
+const { commissionerSignatureExists } = require('../services/commissionerSignature');
 const { monthPrefixForChoice, nextReviewerCreatedOrderId } = require('../services/orderNumberAllocation');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
 const { addSampleFlowQrToPdf } = require('../services/sampleFlowQr');
+const { extractIntegerQuantity } = require('../services/testItemQuantity');
 const router = express.Router();
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
 
@@ -76,6 +78,18 @@ async function createDirectOrderRequest(conn, payload, orderId, reviewerUserId) 
 function safeFilePart(value, fallback = '未填写') {
   const text = String(value || fallback).trim();
   return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
+}
+
+function parseJsonObject(value, fallback = null) {
+  if (!value) return fallback;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
 }
 
 async function nextDirectPdfPaths(absoluteDir, baseName) {
@@ -235,6 +249,7 @@ router.get('/', async (req, res, next) => {
         unit: ti.unit || '',
         department_id: ti.department_id || '',
         note: ti.note || '',
+        flow_note: ti.business_note || '',
         price_id: ti.price_id || null,
         test_code: ti.test_code || null,
         test_condition: ti.detail_name || '',
@@ -290,17 +305,17 @@ router.get('/', async (req, res, next) => {
     };
 
     // sample_handling
-    const [[sh]] = await pool.query(`SELECT * FROM sample_handling WHERE order_id = ? LIMIT 1`, [orderNum]);
+    const [[sh]] = await pool.query(`SELECT * FROM sample_handling WHERE order_id = ? ORDER BY id DESC LIMIT 1`, [orderNum]);
     const sampleHandling = sh ? {
       handling_type: sh.handling_type != null ? String(sh.handling_type) : '',
-      return_info: sh.return_info ? safeJsonParse(sh.return_info, null) : null
+      return_info: parseJsonObject(sh.return_info)
     } : {
       handling_type: o.arrival_mode === 'delivery' ? '3' : '1',
       return_info: null
     };
 
     // sample_requirements
-    const [[sr]] = await pool.query(`SELECT * FROM sample_requirements WHERE order_id = ? LIMIT 1`, [orderNum]);
+    const [[sr]] = await pool.query(`SELECT * FROM sample_requirements WHERE order_id = ? ORDER BY id DESC LIMIT 1`, [orderNum]);
     const sampleRequirements = sr ? {
       hazards: safeJsonParse(sr.hazards, []),
       hazardOther: sr.hazard_other || '',
@@ -617,6 +632,10 @@ async function createCommissionFromPayload(payload, options = {}) {
     const testItems = Array.isArray(payload.testItems) ? payload.testItems : [];
     for (let tiIndex = 0; tiIndex < testItems.length; tiIndex++) {
       const item = testItems[tiIndex];
+      const quantity = extractIntegerQuantity(item.quantity);
+      if (quantity == null) {
+        throw Object.assign(new Error(`提交失败！第${tiIndex + 1}行：数量必须包含大于 0 的整数`), { status: 400 });
+      }
       try {
         console.log('[commission][POST] -> test_item incoming', {
           name: item.test_item,
@@ -742,9 +761,9 @@ async function createCommissionFromPayload(payload, options = {}) {
         INSERT INTO test_items (
           order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
           quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-          sample_name, material, sample_type, original_no, sample_preparation, note, price_note,
+          sample_name, material, sample_type, original_no, sample_preparation, note, business_note, price_note,
           arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`, unit_mismatch_reviewed
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
       const [r] = await conn.query(insertTestItemSql, [
         order_id,
@@ -755,7 +774,7 @@ async function createCommissionFromPayload(payload, options = {}) {
         item.test_method || null,
         (priceInfo && priceInfo.department_id) || item.department_id || null,
         (priceInfo && priceInfo.group_id) || item.group_id || null,
-        item.quantity || 1,
+        quantity,
         unit_price,
         item.discount_rate != null && String(item.discount_rate).trim() !== '' ? item.discount_rate : null,
         final_unit_price,
@@ -769,6 +788,7 @@ async function createCommissionFromPayload(payload, options = {}) {
         item.original_no || null,
         item.sample_preparation || null,
         item.note || null,
+        item.flow_note || null,
         item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null,
         (item.arrival_mode === 'mail'
           ? 'delivery'
@@ -857,6 +877,14 @@ async function createCommissionFromPayload(payload, options = {}) {
 
 router.post('/', requireReviewer, async (req, res, next) => {
   try {
+    if (!await commissionerSignatureExists(req.body?.commissionerId)) {
+      return res.status(409).json({ message: '委托方电子签名不存在，请先上传签名后再开单' });
+    }
+    const salesperson = await getSalespersonByPayer(pool, req.body?.paymentId);
+    if (!salesperson) return res.status(400).json({ message: '所选付款方未绑定有效的业务服务方' });
+    if (!salesperson.signature_available) {
+      return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，请联系管理员处理' });
+    }
     const result = await createCommissionFromPayload(req.body, {
       operatorUserId: req.user.user_id,
       recordDirectRequest: true
@@ -886,8 +914,25 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     }
 
     pdfStage = '读取委托单';
-    const [[order]] = await conn.query('SELECT order_id FROM orders WHERE order_id = ?', [orderNum]);
+    const [[order]] = await conn.query(
+      `SELECT o.order_id, o.commissioner_id, p.owner_user_id AS sales_user_id
+       FROM orders o
+       LEFT JOIN payers p ON p.payer_id = o.payer_id
+       WHERE o.order_id = ?`,
+      [orderNum]
+    );
     if (!order) return res.status(404).json({ message: '正式委托单不存在' });
+    if (!await commissionerSignatureExists(order.commissioner_id)) {
+      return res.status(409).json({ message: '委托方电子签名不存在，无法生成 PDF' });
+    }
+    if (!await signatureExists(order.sales_user_id)) {
+      return res.status(409).json({ message: '业务服务方电子签名不存在或文件格式不正确，无法生成 PDF' });
+    }
+    templateData.commissioner_id = order.commissioner_id;
+    templateData.sales_user_id = order.sales_user_id;
+    templateData.customer_signature_date = templateData.customer_signature_date
+      || templateData.sales_signature_date
+      || formatLocalDate();
     const [testItems] = await conn.query(
       'SELECT test_item_id FROM test_items WHERE order_id = ? ORDER BY test_item_id',
       [orderNum]
@@ -1068,6 +1113,7 @@ router.put('/:id', async (req, res, next) => {
         if (item.final_unit_price !== undefined) { setFragments.push(`final_unit_price = ?`); vals.push(item.final_unit_price); }
         if (item.line_total !== undefined) { setFragments.push(`line_total = ?`); vals.push(item.line_total); }
         if (item.note !== undefined) { setFragments.push(`note = ?`); vals.push(item.note ?? null); }
+        if (item.flow_note !== undefined) { setFragments.push(`business_note = ?`); vals.push(item.flow_note ?? null); }
         if (item.price_note !== undefined) {
           setFragments.push(`price_note = ?`);
           vals.push(item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null);
@@ -1294,4 +1340,4 @@ router.get('/check-order', async (req, res, next) => {
   }
 });
 
-module.exports = { router, createCommissionFromPayload, createDirectOrderRequest };
+module.exports = { router, createCommissionFromPayload, createDirectOrderRequest, parseJsonObject };
