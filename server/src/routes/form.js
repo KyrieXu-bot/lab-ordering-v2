@@ -17,7 +17,8 @@ router.get('/customers', async (req, res, next) => {
               p.payer_id
        FROM commissioners m
        JOIN payers p ON p.payer_id = m.payer_id
-       WHERE m.is_active = 1 AND p.is_active = 1
+       JOIN customers c ON c.customer_id = p.customer_id
+       WHERE m.is_active = 1 AND p.is_active = 1 AND c.is_active = 1
          AND (m.commissioner_name LIKE ?)
          AND (m.contact_name LIKE ? OR ? = '')
          AND (m.contact_phone LIKE ? OR ? = '')

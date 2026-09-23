@@ -67,6 +67,87 @@ test('加测版 PDF 在原业务快照后追加所有已录入的加测项目并
   ]);
 });
 
+test('加测申请中标记取消的原项目不进入客户 PDF', () => {
+  const original = {
+    templateData: { customer_name: '苏州大学' },
+    formSnapshot: { businessTestItems: [{ sampleName: '原样品', test_item: '原项目', quantity: 1 }] }
+  };
+  const addOn = {
+    formSnapshot: {
+      businessTestItems: [
+        { sampleName: '原样品', test_item: '原项目', quantity: 1, cancelled_in_additional_test: true, cancelled_at: '2026-09-22T08:00:00Z' },
+        { sampleName: '加测样品', test_item: '加测项目', quantity: 2 }
+      ]
+    }
+  };
+
+  const result = buildOrderRequestPdfTemplateData(original, original, 'JC26080001', [addOn]);
+
+  assert.deepEqual(result.testItems.map((item) => item.test_item), ['加测项目']);
+});
+
+test('加测取消按项目逐行移除，不会误删内容相同的另一行', () => {
+  const original = {
+    templateData: { customer_name: '苏州大学' },
+    formSnapshot: {
+      businessTestItems: [
+        { sampleName: '相同样品', test_item: '相同项目', quantity: 1 },
+        { sampleName: '相同样品', test_item: '相同项目', quantity: 1 }
+      ]
+    }
+  };
+  const addOn = {
+    formSnapshot: {
+      businessTestItems: [
+        { sampleName: '相同样品', test_item: '相同项目', quantity: 1, cancelled_in_additional_test: true }
+      ]
+    }
+  };
+
+  const result = buildOrderRequestPdfTemplateData(original, original, 'JC26080001', [addOn]);
+
+  assert.equal(result.testItems.length, 1);
+  assert.equal(result.testItems[0].test_item, '相同项目');
+});
+
+test('加测申请补充的其他要求进入重新生成的客户 PDF', () => {
+  const original = {
+    templateData: { customer_name: '苏州大学', other_requirements: '原要求' },
+    formSnapshot: {
+      formData: { otherRequirements: '原要求' },
+      businessTestItems: [{ sampleName: '原样品', test_item: '原项目', quantity: 1 }]
+    }
+  };
+  const addOn = {
+    commissionData: { orderInfo: { other_requirements: '原要求\n加测样品需避光保存' } },
+    formSnapshot: {
+      formData: { otherRequirements: '原要求\n加测样品需避光保存' },
+      businessTestItems: [{ sampleName: '加测样品', test_item: '加测项目', quantity: 1 }]
+    }
+  };
+
+  const result = buildOrderRequestPdfTemplateData(original, original, 'JC26080001', [addOn]);
+
+  assert.equal(result.other_requirements, '原要求\n加测样品需避光保存');
+});
+
+test('后续加测恢复此前取消的项目后，项目重新进入客户 PDF', () => {
+  const original = {
+    templateData: { customer_name: '苏州大学' },
+    formSnapshot: { businessTestItems: [{ test_item_id: 101, sampleName: '原样品', test_item: '原项目', quantity: 1 }] }
+  };
+  const cancellation = {
+    formSnapshot: { businessTestItems: [{ test_item_id: 101, sampleName: '原样品', test_item: '原项目', quantity: 1, cancelled_in_additional_test: true }] }
+  };
+  const restoration = {
+    formSnapshot: { businessTestItems: [{ test_item_id: 101, sampleName: '原样品', test_item: '原项目', quantity: 1, restored_in_additional_test: true }] }
+  };
+
+  const result = buildOrderRequestPdfTemplateData(original, original, 'JC26080001', [cancellation, restoration]);
+
+  assert.deepEqual(result.testItems.map((item) => item.test_item), ['原项目']);
+});
+
 test('修改审批通过后的 PDF 使用修改快照中的检测项目和样品原号', () => {
   const original = {
     templateData: { customer_name: '原客户' },
@@ -88,6 +169,38 @@ test('修改审批通过后的 PDF 使用修改快照中的检测项目和样品
   assert.deepEqual(result.testItems.map((item) => [item.sample_name, item.original_no, item.test_item]), [
     ['修改后样品', 'NEW-001', '修改后项目']
   ]);
+});
+
+test('修改申请把流转顺序从否改为是后，PDF 使用修改快照的新选择', () => {
+  const original = {
+    workflow: { requestType: 'normal' },
+    templateData: {
+      customer_name: '原客户',
+      requires_flow: 0,
+      flowRequiredYesSymbol: '☐',
+      flowRequiredNoSymbol: '☑',
+      flow_note: ''
+    },
+    formSnapshot: { businessTestItems: [{ sampleName: '原样品', test_item: '原项目' }] }
+  };
+  const modification = {
+    workflow: { requestType: 'modification' },
+    templateData: {
+      customer_name: '原客户',
+      requires_flow: 1,
+      flowRequiredYesSymbol: '☑',
+      flowRequiredNoSymbol: '☐',
+      flow_note: '项目2完成后再做项目1'
+    },
+    formSnapshot: { businessTestItems: [{ sampleName: '原样品', test_item: '原项目' }] }
+  };
+
+  const result = buildOrderRequestPdfTemplateData(modification, original, 'JC26091047');
+
+  assert.equal(result.requires_flow, 1);
+  assert.equal(result.flowRequiredYesSymbol, '☑');
+  assert.equal(result.flowRequiredNoSymbol, '☐');
+  assert.equal(result.flow_note, '项目2完成后再做项目1');
 });
 
 test('修改版 PDF 只追加修改审批后完成录入的加测项目', () => {

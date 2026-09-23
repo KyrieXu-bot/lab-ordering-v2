@@ -53,6 +53,11 @@ function buildProcessTemplateData(packet = {}, orderNum, testItems = [], now = n
   const reportTypes = Array.isArray(report.type) ? report.type : [];
   const reportSeals = Array.isArray(order.report_seals) ? order.report_seals : [];
   const hazards = Array.isArray(requirements.hazards) ? requirements.hazards : [];
+  const applicationForm = packet.formSnapshot?.formData || {};
+  const applicationFlowNote = order.flow_note || applicationForm.flowNote || '';
+  const applicationRequiresFlow = order.requires_flow === true
+    || applicationForm.flowRequired === 'yes'
+    || Boolean(applicationFlowNote);
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   // 流转单使用委托单周期和各检测项目中的最高加急级别，兼容历史快照字段。
   const urgency = resolveFlowUrgency(packet, items);
@@ -92,6 +97,10 @@ function buildProcessTemplateData(packet = {}, orderNum, testItems = [], now = n
     header_additional_info: report.header_other || '',
     ...urgencySymbols,
     delivery_days_after_receipt: order.delivery_days_after_receipt || '',
+    requires_flow: applicationRequiresFlow ? 1 : 0,
+    flowRequiredYesSymbol: applicationRequiresFlow ? '☑' : '☐',
+    flowRequiredNoSymbol: applicationRequiresFlow ? '☐' : '☑',
+    flow_note: applicationFlowNote,
     returnNoSymbol: String(handling.handling_type || '') === '1' ? '☑' : '☐',
     returnPickupSymbol: String(handling.handling_type || '') === '2' ? '☑' : '☐',
     returnMailSymbol: String(handling.handling_type || '') === '3' ? '☑' : '☐',

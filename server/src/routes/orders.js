@@ -37,10 +37,11 @@ router.post('/', async (req, res, next) => {
     await conn.beginTransaction();
     const order_id = await nextOrderId(prefix);
 
+    const commonOrderValues = [order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note];
     await conn.query(
       `INSERT INTO orders (order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note]
+      commonOrderValues
     );
 
     for (const ti of test_items) {
@@ -59,7 +60,7 @@ router.post('/', async (req, res, next) => {
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [order_id, price_id, category_name, detail_name, test_code, standard_code, department_id, group_id,
          quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
-         ti.sample_name || null, ti.material || null, ti.sample_type || null, ti.original_no || null, ti.sample_preparation || null, ti.note || null, ti.flow_note || null,
+         ti.sample_name || null, ti.material || null, ti.sample_type || null, ti.original_no || null, ti.sample_preparation || null, ti.note || null, null,
          (ti.arrival_mode === 'mail' ? 'delivery' : (ti.arrival_mode || null)),
          (ti.sample_arrival_status === 'not_arrived' || ti.sample_arrival_status === 'arrived') ? ti.sample_arrival_status : 'arrived']
       );

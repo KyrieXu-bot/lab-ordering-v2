@@ -7,9 +7,16 @@ import OrderRequestPreviewModal from '../components/OrderRequestPreviewModal'
 import TextDetailModal, { TruncatedDetailLink } from '../components/TextDetailModal'
 import RequestDownloadMenu from '../components/RequestDownloadMenu'
 
-const statusText = { submitted: '待审批', pending_open: '待开单', opened: '已开单', returned: '已驳回', withdrawn: '已撤回' }
+const statusText = { draft: '草稿中', submitted: '待审批', pending_open: '待开单', opened: '已开单', returned: '已驳回', withdrawn: '已撤回' }
 const requestTypeText = { normal: '普通', modification: '修改', additional_test: '加测' }
 const PAGE_SIZE = 20
+
+function editButtonText(row) {
+  if (row.status === 'draft') return '修改草稿'
+  if (row.request_type === 'additional_test') return '修改加测'
+  if (row.request_type === 'modification') return '修改修改'
+  return '修改申请'
+}
 
 export default function SalesDashboard() {
   const navigate = useNavigate()
@@ -98,11 +105,27 @@ export default function SalesDashboard() {
       group.pdfRow = group.rows.find(row => Boolean(row.pdf_generated) && Boolean(row.attachment_file_id))
       group.flowRow = group.rows.find(row => Boolean(row.order_opened) && Boolean(row.approved_order_id)) || group.source
       group.requirementRow = group.rows.find(row => Boolean(row.requirement_file_id)) || group.opening
-      group.pendingModification = group.rows.some(row => row.request_type === 'modification' && row.status === 'submitted')
-      group.pendingAdditionalTest = group.rows.some(row => row.request_type === 'additional_test' && row.status === 'submitted')
+      group.pendingModificationRequest = group.rows.find(row => row.request_type === 'modification' && ['submitted', 'returned'].includes(row.status)) || null
+      group.pendingAdditionalTestRequest = group.rows.find(row => row.request_type === 'additional_test' && ['submitted', 'returned'].includes(row.status)) || null
+      group.blockingFollowUp = group.pendingModificationRequest
+        || group.pendingAdditionalTestRequest
+        || group.rows.find(row => row.request_type === 'additional_test' && row.status === 'approved' && !row.order_opened)
+        || null
       return group
     })
   }, [rows, requestTypeFilter])
+
+  function renderFollowUpActions(group) {
+    if (!group.source) return null
+    const blocked = Boolean(group.blockingFollowUp)
+    const addButton = group.pendingAdditionalTestRequest
+      ? <button className="additional-test-button" onClick={() => navigate(`/requests/${group.pendingAdditionalTestRequest.request_id}/edit`)}>修改加测</button>
+      : <button className="additional-test-button" disabled={blocked} title={blocked ? '请先完成当前修改或加测申请' : ''} onClick={() => navigate(`/requests/${group.source.request_id}/add-test`)}>{group.blockingFollowUp?.status === 'approved' ? '加测待录入' : '加测'}</button>
+    const modificationButton = group.pendingModificationRequest
+      ? <button className="change-order-button" onClick={() => navigate(`/requests/${group.pendingModificationRequest.request_id}/edit`)}>修改修改</button>
+      : <button className="change-order-button" disabled={blocked} title={blocked ? '请先完成当前修改或加测申请' : ''} onClick={() => setChangeSource(group.source)}>修改</button>
+    return <>{addButton}{modificationButton}</>
+  }
 
   function toggleGroup(key) { setExpandedGroups(prev => ({ ...prev, [key]: !prev[key] })) }
   function openGroupPreview(group) {
@@ -127,7 +150,7 @@ export default function SalesDashboard() {
             <div className="portal-card-tools">
               <label className="portal-search"><span>搜索</span><input type="search" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="申请编号 / 委托方 / 委托人 / 业务员 / 正式单号" /></label>
               <label className="portal-select-filter"><span>申请类型</span><select value={requestTypeFilter} onChange={(event) => changeRequestTypeFilter(event.target.value)}><option value="all">全部</option><option value="normal">普通</option><option value="additional_test">加测</option><option value="modification">修改</option></select></label>
-              <div className="portal-tabs">{[['all','全部'],['submitted','待审批'],['pending_open','待开单'],['opened','已开单'],['returned','已驳回'],['withdrawn','已撤回']].map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => changeFilter(key)}>{label}</button>)}</div>
+              <div className="portal-tabs">{[['all','全部'],['draft','草稿中'],['submitted','待审批'],['pending_open','待开单'],['opened','已开单'],['returned','已驳回'],['withdrawn','已撤回']].map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => changeFilter(key)}>{label}</button>)}</div>
             </div>
           </div>
           {error && <div className="portal-error">{error}</div>}
@@ -153,16 +176,16 @@ export default function SalesDashboard() {
                         {group.rows.length > 1 ? (
                           <>
                             <button onClick={() => openGroupPreview(group)}>预览</button>
-                            {group.source && <><button className="additional-test-button" disabled={group.pendingAdditionalTest} title={group.pendingAdditionalTest ? '已有待审批的加测申请' : ''} onClick={() => navigate(`/requests/${group.source.request_id}/add-test`)}>加测</button><button className="change-order-button" disabled={group.pendingModification} title={group.pendingModification ? '已有待审批的修改申请' : ''} onClick={() => setChangeSource(group.source)}>修改</button></>}
+                            {renderFollowUpActions(group)}
                             <RequestDownloadMenu pdfRow={group.pdfRow} flowRow={group.flowRow} requirementRow={group.requirementRow} />
                             <button type="button" className={`group-operation-toggle${expanded ? ' is-expanded' : ''}`} onClick={() => toggleGroup(group.key)} aria-expanded={expanded}>{expanded ? '收起 ↑' : '展开 ↓'}</button>
                           </>
                         ) : (
                           <>
                             <button onClick={() => openGroupPreview(group)}>预览</button>
-                            {group.source && <><button className="additional-test-button" disabled={group.pendingAdditionalTest} title={group.pendingAdditionalTest ? '已有待审批的加测申请' : ''} onClick={() => navigate(`/requests/${group.source.request_id}/add-test`)}>加测</button><button className="change-order-button" disabled={group.pendingModification} title={group.pendingModification ? '已有待审批的修改申请' : ''} onClick={() => setChangeSource(group.source)}>修改</button></>}
+                            {renderFollowUpActions(group)}
                             <RequestDownloadMenu pdfRow={group.pdfRow} flowRow={group.flowRow} requirementRow={group.requirementRow} />
-                            {['submitted','returned'].includes(row.status) && <button onClick={() => navigate(`/requests/${row.request_id}/edit`)}>修改申请</button>}
+                            {['draft','submitted','returned'].includes(row.status) && <button onClick={() => navigate(`/requests/${row.request_id}/edit`)}>{editButtonText(row)}</button>}
                             {row.status === 'submitted' && <button className="danger" onClick={() => withdraw(row)}>撤回</button>}
                           </>
                         )}
@@ -174,12 +197,12 @@ export default function SalesDashboard() {
                         <strong className="portal-mono request-history-number">{item.request_no}</strong>
                         <span className="request-history-person" title={item.applicant_name || ''}>申请人：{item.applicant_name || '—'}</span>
                         <span className="request-history-person" title={item.salesperson_name || ''}>业务员：{item.salesperson_name || '—'}</span>
-                        <time className="request-history-time" dateTime={item.submitted_at || ''}>{formatTime(item.submitted_at)}</time>
+                        <time className="request-history-time" dateTime={item.submitted_at || item.updated_at || ''}>{formatTime(item.submitted_at || item.updated_at)}</time>
                         <span className={`status-pill request-history-status status-${item.display_status}`}>{statusText[item.display_status] || item.display_status}</span>
                         <span className="request-history-note" title={item.review_note || ''}>{item.review_note || '—'}</span>
                         <div className="request-history-actions">
                           <RequestDownloadMenu pdfRow={item.attachment_file_id ? item : null} flowRow={group.flowRow} requirementRow={item} compact />
-                          {['submitted','returned'].includes(item.status) && <button onClick={() => navigate(`/requests/${item.request_id}/edit`)}>修改申请</button>}
+                          {['draft','submitted','returned'].includes(item.status) && <button onClick={() => navigate(`/requests/${item.request_id}/edit`)}>{editButtonText(item)}</button>}
                           {item.status === 'submitted' && <button className="danger" onClick={() => withdraw(item)}>撤回</button>}
                         </div>
                       </div>)}

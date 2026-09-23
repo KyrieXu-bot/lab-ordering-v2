@@ -167,7 +167,7 @@ export default function ReviewerDashboard() {
         </section>
         <section className="portal-card">
           <div className="portal-card-heading">
-            <div><h2>申请队列</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条；未生成正式单号的申请在前，其余按正式单号升序</p></div>
+            <div><h2>申请队列</h2><p>共 {total} 条，每页 {PAGE_SIZE} 条；待审批特急、加急申请优先置顶，其余按正式单号升序</p></div>
             <div className="portal-card-tools">
               <label className="portal-search"><span>搜索</span><input type="search" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="申请编号 / 委托方 / 委托人 / 业务员 / 正式单号" /></label>
               <label className="portal-select-filter"><span>申请类型</span><select value={requestTypeFilter} onChange={(event) => changeRequestTypeFilter(event.target.value)}><option value="all">全部</option><option value="normal">普通</option><option value="additional_test">加测</option><option value="modification">修改</option></select></label>

@@ -9,12 +9,36 @@ const { commissionerSignatureExists } = require('../services/commissionerSignatu
 const { monthPrefixForChoice, nextReviewerCreatedOrderId } = require('../services/orderNumberAllocation');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
-const { addSampleFlowQrToPdf } = require('../services/sampleFlowQr');
+const { addSampleFlowQrToPdf, createSampleFlowToken } = require('../services/sampleFlowQr');
 const { extractIntegerQuantity } = require('../services/testItemQuantity');
 const router = express.Router();
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function extractReportSeals(payload = {}) {
+  const candidates = [
+    payload.orderInfo?.report_seals,
+    payload.reportInfo?.report_seals,
+    payload.report_seals,
+    payload.reportSeals
+  ];
+  for (const candidate of candidates) {
+    const seals = parseJsonArray(candidate);
+    if (seals.length || Array.isArray(candidate)) return seals;
+  }
+  return [];
+}
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
 
 async function createDirectOrderRequest(conn, payload, orderId, reviewerUserId) {
+  const sampleFlowToken = createSampleFlowToken();
   const [[applicant]] = await conn.query(
     `SELECT user_id FROM users
      WHERE name = '马婷' AND is_active = 1
@@ -56,9 +80,9 @@ async function createDirectOrderRequest(conn, payload, orderId, reviewerUserId) 
   const [result] = await conn.query(
     `INSERT INTO order_requests
       (applicant_user_id, reviewer_user_id, status, request_type, customer_id, payer_id, commissioner_id,
-       submitted_payload, reviewed_payload, schema_version, approved_order_id,
+       submitted_payload, reviewed_payload, schema_version, approved_order_id, sample_flow_token,
        submitted_at, reviewed_at, applied_at)
-     VALUES (?, ?, 'approved', 'normal', ?, ?, ?, ?, ?, 2, ?,
+     VALUES (?, ?, 'approved', 'normal', ?, ?, ?, ?, ?, 2, ?, ?,
              CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
     [
       applicant.user_id,
@@ -68,7 +92,8 @@ async function createDirectOrderRequest(conn, payload, orderId, reviewerUserId) 
       payload.commissionerId || null,
       JSON.stringify(requestPacket),
       JSON.stringify(requestPacket),
-      orderId
+      orderId,
+      sampleFlowToken
     ]
   );
   await conn.query('UPDATE order_requests SET root_request_id = request_id WHERE request_id = ?', [result.insertId]);
@@ -249,7 +274,6 @@ router.get('/', async (req, res, next) => {
         unit: ti.unit || '',
         department_id: ti.department_id || '',
         note: ti.note || '',
-        flow_note: ti.business_note || '',
         price_id: ti.price_id || null,
         test_code: ti.test_code || null,
         test_condition: ti.detail_name || '',
@@ -551,16 +575,15 @@ async function createCommissionFromPayload(payload, options = {}) {
     const original_order_id = previousOrderId || null;
     
     try { console.log('[commission][POST] creating order', { order_id, created_by, is_transferred, original_order_id, rootOrderId }); } catch (_) {}
+    const commonOrderValues = [order_id, customerId, paymentId || null, commissionerId, created_by,
+      payload?.orderInfo?.is_internal ? 1 : 0,
+      payload?.orderInfo?.agreement_note || null,
+      payload?.orderInfo?.other_requirements || null];
+    const trailingOrderValues = [is_transferred, original_order_id, rootOrderId];
     await conn.query(
       `INSERT INTO orders (order_id, customer_id, payer_id, commissioner_id, created_by, is_internal, agreement_note, note, is_transferred, original_order_id, root_order_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [order_id, customerId, paymentId || null, commissionerId, created_by,
-       payload?.orderInfo?.is_internal ? 1 : 0,
-       payload?.orderInfo?.agreement_note || null,
-       payload?.orderInfo?.other_requirements || null,
-       is_transferred,
-       original_order_id,
-       rootOrderId]
+      [...commonOrderValues, ...trailingOrderValues]
     );
     
     // 如果是转单，插入转单历史记录
@@ -598,7 +621,7 @@ async function createCommissionFromPayload(payload, options = {}) {
         reportInfo.header_other || null,
         reportInfo.format_type || null,
         // 若前端把 report_seals 放在 orderInfo.report_seals 或 top-level reportSeals，请替换至正确来源
-        (orderInfo.report_seals || payload.reportSeals || JSON.stringify([])) && JSON.stringify(orderInfo.report_seals || payload.reportSeals || [])
+        JSON.stringify(extractReportSeals(payload))
       ]
     );
 
@@ -788,7 +811,7 @@ async function createCommissionFromPayload(payload, options = {}) {
         item.original_no || null,
         item.sample_preparation || null,
         item.note || null,
-        item.flow_note || null,
+        null,
         item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null,
         (item.arrival_mode === 'mail'
           ? 'delivery'
@@ -945,6 +968,15 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     lockAcquired = Number(lockResult?.acquired) === 1;
     if (!lockAcquired) return res.status(409).json({ message: '该委托单正在生成 PDF，请稍后重试' });
 
+    const [[directRequest]] = await conn.query(
+      `SELECT request_id, sample_flow_token FROM order_requests
+       WHERE request_type = 'normal' AND approved_order_id = ? AND status = 'approved'
+       ORDER BY request_id DESC LIMIT 1`,
+      [orderNum]
+    );
+    if (!directRequest) return res.status(409).json({ message: '未找到该正式委托单对应的开单申请，无法生成样品流转二维码' });
+    const sampleFlowToken = directRequest.sample_flow_token || createSampleFlowToken();
+
     const orderId = safeFilePart(orderNum, '委托单');
     const customerName = safeFilePart(templateData.customer_name, '委托方');
     const contactName = safeFilePart(templateData.customer_contactName, '联系人');
@@ -959,7 +991,7 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
     pdfStage = 'Word 转 PDF';
     const conversion = await convertDocxToPdf(docxPath, pdfPath);
     pdfStage = '写入流转二维码';
-    await addSampleFlowQrToPdf(pdfPath, `DIRECT_${orderNum}`);
+    await addSampleFlowQrToPdf(pdfPath, sampleFlowToken);
     const pdfStat = await fs.stat(pdfPath);
     if (!pdfStat.size) throw new Error('生成的 PDF 文件为空');
 
@@ -980,12 +1012,6 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
         [filename, projectFilepath, orderNum, testItem.test_item_id, req.user.user_id]
       );
     }
-    const [[directRequest]] = await conn.query(
-      `SELECT request_id FROM order_requests
-       WHERE request_type = 'normal' AND approved_order_id = ?
-       ORDER BY request_id DESC LIMIT 1 FOR UPDATE`,
-      [orderNum]
-    );
     if (directRequest) {
       const storedPath = path.relative(uploadsRoot, pdfPath).replace(/\\/g, '/');
       const [fileResult] = await conn.query(
@@ -995,8 +1021,10 @@ router.post('/:orderNum/generate-pdf', requireReviewer, async (req, res, next) =
         [directRequest.request_id, filename, storedPath, pdfStat.size, req.user.user_id]
       );
       await conn.query(
-        'UPDATE order_requests SET attachment_file_id = ?, version = version + 1 WHERE request_id = ?',
-        [fileResult.insertId, directRequest.request_id]
+        `UPDATE order_requests
+         SET attachment_file_id = ?, sample_flow_token = COALESCE(sample_flow_token, ?), version = version + 1
+         WHERE request_id = ?`,
+        [fileResult.insertId, sampleFlowToken, directRequest.request_id]
       );
     }
     await conn.commit();
@@ -1046,16 +1074,12 @@ router.put('/:id', async (req, res, next) => {
 
     // 2. 更新 orders 表
     const updateOrder = [];
-    if (payload.total_price !== undefined) updateOrder.push(`total_price = ?`);
-    if (payload.delivery_days_after_receipt !== undefined) updateOrder.push(`delivery_days_after_receipt = ?`);
-    if (payload.subcontracting_not_accepted !== undefined) updateOrder.push(`subcontracting_not_accepted = ?`);
+    const updateOrderValues = [];
+    if (payload.total_price !== undefined) { updateOrder.push(`total_price = ?`); updateOrderValues.push(payload.total_price || null); }
+    if (payload.delivery_days_after_receipt !== undefined) { updateOrder.push(`delivery_days_after_receipt = ?`); updateOrderValues.push(payload.delivery_days_after_receipt || null); }
+    if (payload.subcontracting_not_accepted !== undefined) { updateOrder.push(`subcontracting_not_accepted = ?`); updateOrderValues.push(payload.subcontracting_not_accepted ? 1 : 0); }
     if (updateOrder.length > 0) {
-      await pool.query(`UPDATE orders SET ${updateOrder.join(', ')} WHERE order_id = ?`, [
-        payload.total_price || null,
-        payload.delivery_days_after_receipt || null,
-        payload.subcontracting_not_accepted ? 1 : 0,
-        id
-      ]);
+      await pool.query(`UPDATE orders SET ${updateOrder.join(', ')} WHERE order_id = ?`, [...updateOrderValues, id]);
     }
 
     // 3. 更新 reports 表
@@ -1068,7 +1092,7 @@ router.put('/:id', async (req, res, next) => {
         payload.reportInfo.header_other || null,
         payload.reportInfo.format_type || null,
         // 若前端把 report_seals 放在 orderInfo.report_seals 或 top-level reportSeals，请替换至正确来源
-        (payload.report_seals || payload.reportSeals || JSON.stringify([])) && JSON.stringify(payload.report_seals || payload.reportSeals || []),
+        JSON.stringify(extractReportSeals(payload)),
         id
       ]);
     }
@@ -1113,7 +1137,6 @@ router.put('/:id', async (req, res, next) => {
         if (item.final_unit_price !== undefined) { setFragments.push(`final_unit_price = ?`); vals.push(item.final_unit_price); }
         if (item.line_total !== undefined) { setFragments.push(`line_total = ?`); vals.push(item.line_total); }
         if (item.note !== undefined) { setFragments.push(`note = ?`); vals.push(item.note ?? null); }
-        if (item.flow_note !== undefined) { setFragments.push(`business_note = ?`); vals.push(item.flow_note ?? null); }
         if (item.price_note !== undefined) {
           setFragments.push(`price_note = ?`);
           vals.push(item.price_note != null && String(item.price_note).trim() !== '' ? item.price_note : null);
@@ -1340,4 +1363,4 @@ router.get('/check-order', async (req, res, next) => {
   }
 });
 
-module.exports = { router, createCommissionFromPayload, createDirectOrderRequest, parseJsonObject };
+module.exports = { router, createCommissionFromPayload, createDirectOrderRequest, parseJsonObject, extractReportSeals };

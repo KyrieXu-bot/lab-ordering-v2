@@ -27,6 +27,18 @@ test('流转单采用委托单周期和检测项目中的最高加急级别', ()
   }, [{ service_urgency: 'urgent_2x' }]), 'urgent_2x');
 });
 
+test('业务流转说明从申请快照读取，不依赖正式单数据库字段', () => {
+  const data = buildProcessTemplateData({
+    commissionData: { orderInfo: {} },
+    formSnapshot: { formData: { flowRequired: 'yes', flowNote: '先做项目2，再做项目1' } }
+  }, 'TEST001');
+
+  assert.equal(data.requires_flow, 1);
+  assert.equal(data.flowRequiredYesSymbol, '☑');
+  assert.equal(data.flowRequiredNoSymbol, '☐');
+  assert.equal(data.flow_note, '先做项目2，再做项目1');
+});
+
 test('流转单模板渲染后不出现 undefined', async () => {
   const data = buildProcessTemplateData({ commissionData: { orderInfo: { order_urgency_type: 'urgent_2x' } } }, 'TEST001');
   const buffer = await generateProcessTemplateBuffer(data);

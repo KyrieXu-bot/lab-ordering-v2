@@ -166,6 +166,7 @@ button, input { font: inherit; }
 .urgency-normal { background:#eceeeb; color:#68716d; }
 .urgency-urgent_1_5x { background:#faead6; color:#a06020; }
 .urgency-urgent_2x { background:#f6deda; color:#a1443c; }
+.status-draft { background:#fff0cf; color:#8a5c12; }
 .portal-table tbody tr.portal-priority-row { background:#fffaf1; box-shadow:inset 3px 0 0 #d99a4e; }
 .portal-table tbody tr.portal-priority-row:hover { background:#fff6e7; }
 .portal-tabs { box-sizing:border-box; display:flex; flex:0 0 450px; width:450px; gap:5px; background:#f3f2ed; padding:4px !important; border-radius:10px; }

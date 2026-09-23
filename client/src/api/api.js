@@ -19,8 +19,13 @@ axios.interceptors.response.use(
 
 export const login = (username, password) => axios.post('/api/auth/login', { username, password })
 export const getOrderRequests = (params = {}) => axios.get('/api/order-requests', { params })
+export const getOrderRequestPrefill = (orderNum) =>
+  axios.get('/api/order-requests/prefill', { params: { orderNum } })
 export const getOrderRequest = (id) => axios.get(`/api/order-requests/${id}`)
 export const createOrderRequest = (payload) => axios.post('/api/order-requests', { payload })
+export const createOrderRequestDraft = (payload) => axios.post('/api/order-requests/draft', { payload })
+export const updateOrderRequestDraft = (id, payload, version) =>
+  axios.put(`/api/order-requests/${id}/draft`, { payload, version })
 export const createOrderFollowUp = (id, requestType, payload) =>
   axios.post(`/api/order-requests/${id}/follow-up`, { request_type: requestType, payload })
 export const updateOrderRequest = (id, payload, version) =>

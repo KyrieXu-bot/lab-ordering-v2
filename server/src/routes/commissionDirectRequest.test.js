@@ -1,6 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createDirectOrderRequest, parseJsonObject } = require('./commission');
+const { createDirectOrderRequest, parseJsonObject, extractReportSeals } = require('./commission');
+
+test('report_seals 可从委托单结构和兼容字段中稳定读取', () => {
+  assert.deepEqual(extractReportSeals({ orderInfo: { report_seals: ['normal', 'cnas'] } }), ['normal', 'cnas']);
+  assert.deepEqual(extractReportSeals({ reportInfo: { report_seals: '["cma"]' } }), ['cma']);
+  assert.deepEqual(extractReportSeals({ reportSeals: ['normal'] }), ['normal']);
+});
 
 test('LIMS 预填可以读取 JSON 对象格式的退回地址', () => {
   const expected = { returnAddressOption: 'other', returnAddress: '苏州市测试地址' };
@@ -46,4 +52,5 @@ test('开单员自行开单同步生成马婷名下的普通已开单申请快�
   assert.equal(submitted.formSnapshot.businessTestItems[0].test_item, '硬度');
   assert.equal(submitted.workflow.directCreated, true);
   assert.equal(insert.params[7], 'JC26090001');
+  assert.match(insert.params[8], /^SF_[A-Za-z0-9_-]{24}$/);
 });

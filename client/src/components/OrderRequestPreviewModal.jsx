@@ -80,7 +80,7 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
             const baseRequest = [...relatedRequests]
               .filter((item) => item.request_type !== 'additional_test' && item.status !== 'withdrawn')
               .sort((a, b) => Number(b.request_id) - Number(a.request_id))[0] || data
-            setMeta({ ...baseRequest, ...(requestMeta || {}), request_type: 'additional_test' })
+            setMeta({ ...baseRequest, ...(requestMeta || {}), request_type: 'additional_test', base_submitted_at: baseRequest.submitted_at })
             setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
             setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
             setAggregatedAdditionalPackets([
@@ -92,7 +92,12 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
             ])
             return
           }
-          setMeta({ ...data, ...(requestMeta || {}), request_type: liveRequestType || data.request_type })
+          setMeta({
+            ...data,
+            ...(requestMeta || {}),
+            request_type: liveRequestType || data.request_type,
+            base_submitted_at: liveRequestType === 'modification' ? new Date().toISOString() : data.submitted_at
+          })
           setPacket(livePacket)
           setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
           if (['modification', 'additional_test'].includes(liveRequestType)) {
@@ -123,7 +128,7 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
           .filter((item) => item.status !== 'withdrawn')
           .sort((a, b) => Number(b.request_id) - Number(a.request_id))
           .find((item) => item.request_type !== 'additional_test') || data
-        setMeta({ ...baseRequest, ...data, request_type: data.request_type })
+        setMeta({ ...baseRequest, ...data, request_type: data.request_type, base_submitted_at: baseRequest.submitted_at })
         setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
         setOfficialOrderItems(await loadOfficialOrderItems(baseRequest.display_order_id || baseRequest.approved_order_id || baseRequest.target_order_id || data.display_order_id))
         setAggregatedAdditionalPackets(relatedRequests
@@ -167,26 +172,88 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
   }, [officialOrderItems, previousView, savedModificationBaselineItems])
   const highlightAddedItems = requestType === 'additional_test'
   const aggregatedAdditionalItems = useMemo(() => aggregatedAdditionalPackets.flatMap((entry) =>
-    normalizePacket(entry.packet, {}).items.map((item) => ({ ...item, traceTime: entry.submittedAt, traceApplied: Boolean(entry.appliedAt) }))
+    normalizePacket(entry.packet, {}).items.map((item) => ({
+      ...item,
+      traceTime: item.cancelledAt || item.restoredAt || entry.submittedAt,
+      traceApplied: Boolean(entry.appliedAt)
+    }))
   ), [aggregatedAdditionalPackets])
+  const previewFlowSettings = useMemo(() => {
+    // 普通、修改、加测申请都可能包含业务流转说明。必须按提交时间取最后一次，
+    // 不能让更早的加测快照覆盖后来修改申请中的“否 → 是”等变更。
+    const candidates = [
+      { packet, submittedAt: meta?.base_submitted_at || meta?.submitted_at || meta?.submittedAt },
+      ...aggregatedAdditionalPackets
+    ]
+      .filter(({ packet: candidatePacket }) => packetHasFlowSettings(candidatePacket))
+      .map((entry, index) => ({
+        ...entry,
+        index,
+        timestamp: new Date(entry.submittedAt || 0).getTime() || 0
+      }))
+      .sort((left, right) => left.timestamp - right.timestamp || left.index - right.index)
+    const latestPacketWithFlowNote = candidates[candidates.length - 1]
+    const latestView = latestPacketWithFlowNote ? normalizePacket(latestPacketWithFlowNote.packet, {}) : view
+    return { required: latestView.flowRequired, note: latestView.flowNote }
+  }, [aggregatedAdditionalPackets, meta, packet, view])
+  const previewOtherRequirements = useMemo(() => {
+    // 加测表单中的“其他要求”是完整的新值；预览应采用时间上最后一次加测快照，
+    // 而不是始终停留在原申请内容。
+    const candidates = [
+      { packet, submittedAt: meta?.base_submitted_at || meta?.submitted_at || meta?.submittedAt },
+      ...aggregatedAdditionalPackets
+    ]
+      .filter(({ packet: candidatePacket }) => {
+        const form = candidatePacket?.formSnapshot?.formData
+        const order = candidatePacket?.commissionData?.orderInfo
+        return Object.prototype.hasOwnProperty.call(form || {}, 'otherRequirements')
+          || Object.prototype.hasOwnProperty.call(order || {}, 'other_requirements')
+      })
+      .map((entry, index) => ({
+        ...entry,
+        index,
+        timestamp: new Date(entry.submittedAt || 0).getTime() || 0
+      }))
+      .sort((left, right) => left.timestamp - right.timestamp || left.index - right.index)
+    const latest = candidates[candidates.length - 1]
+    return latest ? normalizePacket(latest.packet, {}).otherRequirements : view.otherRequirements
+  }, [aggregatedAdditionalPackets, meta, packet, view.otherRequirements])
   const previewItems = useMemo(() => {
     if (aggregatedAdditionalItems.length) {
-      const tracesByFingerprint = new Map()
-      aggregatedAdditionalItems.forEach((item) => {
-        const fingerprint = itemFingerprint(item)
-        if (!tracesByFingerprint.has(fingerprint)) tracesByFingerprint.set(fingerprint, [])
-        tracesByFingerprint.get(fingerprint).push(item)
+      const mergedItems = view.items.map((item) => ({ ...item, previewAdded: false }))
+      aggregatedAdditionalItems.forEach((trace) => {
+        const matchingIndex = mergedItems.findIndex((item) => samePreviewItem(item, trace))
+        if (trace.cancelled) {
+          if (matchingIndex >= 0) {
+            mergedItems[matchingIndex] = {
+              ...mergedItems[matchingIndex],
+              cancelled: true,
+              cancelledAt: trace.cancelledAt,
+              restored: false,
+              restoredAt: null,
+              traceTime: trace.traceTime
+            }
+          }
+          return
+        }
+        if (trace.restored) {
+          if (matchingIndex >= 0) {
+            mergedItems[matchingIndex] = {
+              ...mergedItems[matchingIndex],
+              cancelled: false,
+              cancelledAt: null,
+              restored: true,
+              restoredAt: trace.restoredAt,
+              traceTime: trace.traceTime
+            }
+          } else {
+            mergedItems.push({ ...trace, cancelled: false, restored: true, previewAdded: false })
+          }
+          return
+        }
+        mergedItems.push({ ...trace, previewAdded: true })
       })
-      const baseItems = view.items.map((item) => {
-        const matchingTraces = tracesByFingerprint.get(itemFingerprint(item)) || []
-        const trace = matchingTraces.shift()
-        return trace ? { ...item, previewAdded: true, traceTime: trace.traceTime } : { ...item, previewAdded: false }
-      })
-      const remainingAdditionalItems = Array.from(tracesByFingerprint.values()).flat()
-      return [
-        ...baseItems,
-        ...remainingAdditionalItems.map(item => ({ ...item, previewAdded: true }))
-      ]
+      return mergedItems
     }
     if (!view.items.length && officialOrderItems.length) return officialOrderItems.map((item) => ({ ...item, previewAdded: item.isAddOn }))
     if (!highlightAddedItems || !previousView) return view.items.map(item => ({ ...item, previewAdded: false }))
@@ -325,19 +392,26 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
                 </tr></thead><tbody>{previewItems.length ? previewItems.map((item, index) => {
                   const previousItem = previousItemFor(item, index, previousTestItems)
                   const compareItem = compareChanges && !item.previewAdded
-                  return <tr className={item.previewAdded ? 'snapshot-added-item' : ''} key={item.testItemId || index}>
+                  const modifiedItem = compareItem && itemHasChanges(item, previousItem)
+                  const rowClassName = [
+                    item.cancelled ? 'snapshot-cancelled-item' : '',
+                    item.previewAdded ? 'snapshot-added-item' : '',
+                    modifiedItem ? 'snapshot-modified-item' : ''
+                  ].filter(Boolean).join(' ')
+                  return <tr className={rowClassName} key={item.testItemId || index}>
                     <td>{index + 1}</td>
-                    <td><ChangedText value={item.sampleName} previous={previousItem?.sampleName} compare={compareItem}/></td>
-                    <td><ChangedText value={item.material} previous={previousItem?.material} compare={compareItem}/></td>
-                    <td><ChangedText value={item.sampleType} previous={previousItem?.sampleType} compare={compareItem}/></td>
-                    <td><ChangedText value={item.originalNo} previous={previousItem?.originalNo} compare={compareItem}/></td>
+                    <td><ChangedText value={item.sampleName} previous={previousItem?.sampleName} compare={compareItem} forceChanged={itemFieldWasModified(item, 'sampleName', 'sample_name')}/></td>
+                    <td><ChangedText value={item.material} previous={previousItem?.material} compare={compareItem} forceChanged={itemFieldWasModified(item, 'material')}/></td>
+                    <td><ChangedText value={item.sampleType} previous={previousItem?.sampleType} compare={compareItem} forceChanged={itemFieldWasModified(item, 'sampleType', 'sampleTypeCustom', 'sample_type')}/></td>
+                    <td><ChangedText value={item.originalNo} previous={previousItem?.originalNo} compare={compareItem} forceChanged={itemFieldWasModified(item, 'original_no', 'originalNo')}/></td>
                     <td className="snapshot-multiline-value"><ChangedText value={item.testItem} previous={previousItem?.testItem} compare={compareItem}/></td>
-                    <td><ChangedText value={item.method} previous={previousItem?.method} compare={compareItem}/></td>
-                    <td><ChangedText value={item.quantity} previous={previousItem?.quantity} compare={compareItem}/></td>
-                    <td className="snapshot-multiline-value"><ChangedText value={item.note} previous={previousItem?.note} compare={compareItem}/>{item.previewAdded && <span className="snapshot-trace-annotation">加测 · {formatTraceTime(item.traceTime || meta?.submitted_at || meta?.submittedAt)}</span>}</td>
+                    <td><ChangedText value={item.method} previous={previousItem?.method} compare={compareItem} forceChanged={itemFieldWasModified(item, 'test_method', 'testMethod', 'standard_code')}/></td>
+                    <td><ChangedText value={item.quantity} previous={previousItem?.quantity} compare={compareItem} forceChanged={itemFieldWasModified(item, 'quantity')}/></td>
+                    <td className="snapshot-multiline-value"><ChangedText value={item.note} previous={previousItem?.note} compare={compareItem} forceChanged={itemFieldWasModified(item, 'note', 'remarks')}/>{item.cancelled ? <span className="snapshot-trace-annotation is-cancelled">取消 · {formatTraceTime(item.cancelledAt || item.traceTime)}</span> : item.restored ? <span className="snapshot-trace-annotation is-restored">恢复取消 · {formatTraceTime(item.restoredAt || item.traceTime)}</span> : item.previewAdded ? <span className="snapshot-trace-annotation">加测 · {formatTraceTime(item.traceTime || meta?.submitted_at || meta?.submittedAt)}</span> : modifiedItem && <span className="snapshot-trace-annotation is-modification">{modificationTraceNote}</span>}</td>
                   </tr>
                 }) : <tr><td>1</td><td/><td/><td/><td/><td/><td/><td/><td/></tr>}</tbody></table></div>
-                <table className="snapshot-table"><tbody><tr><th>其他要求 <small>Other Requirements</small>：</th><td><ChangedText value={view.otherRequirements} previous={previousView?.otherRequirements} compare={compareChanges}/></td></tr></tbody></table>
+                <table className="snapshot-table"><tbody><tr><th>流转顺序 <small>Flow Sequence</small>：</th><td><Choice checked={previewFlowSettings.required === 'yes'} previousChecked={previousView?.flowRequired === 'yes'} compare={compareChanges}>是</Choice>　<Choice checked={previewFlowSettings.required === 'no'} previousChecked={previousView?.flowRequired === 'no'} compare={compareChanges}>否</Choice>{previewFlowSettings.required === 'yes' && <>　流转备注：<ChangedText value={previewFlowSettings.note} previous={previousView?.flowNote} compare={compareChanges}/></>}</td></tr></tbody></table>
+                <table className="snapshot-table"><tbody><tr><th>其他要求 <small>Other Requirements</small>：</th><td><ChangedText value={previewOtherRequirements} previous={previousView?.otherRequirements} compare={compareChanges}/></td></tr></tbody></table>
                 <div className="snapshot-notes"><strong>注 Notes：</strong><ol><li>默认不出具评判结论。</li><li>未指明测试标准及年代号时，默认接受服务方推荐的方法及最新标准。</li><li><Choice checked={view.subcontractingNotAccepted} previousChecked={previousView?.subcontractingNotAccepted} compare={compareChanges}>不接受分包 Subcontracting is not accepted</Choice>；未勾选视为接受分包。</li><li>其他测试要求请在“其他要求”中写明。</li></ol></div>
               </Section>
               <Section title="样品要求" english="Sample Requirements">
@@ -368,8 +442,8 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
 
 function Section({ title, english, children }) { return <section className="snapshot-section"><h2>{title} <small>{english}</small></h2>{children}</section> }
 function SnapshotHeader({ orderNum }) { return <div className="snapshot-document-header"><div className="snapshot-company-brand"><img src="/JITRI-logo3.png" alt="集萃新材料研发有限公司"/><div><strong>集萃新材料研发有限公司</strong><small>JITRI Advanced Materials R&amp;D Co.,Ltd.</small></div></div><h1>检测委托单 <small>Testing Application Form</small></h1><div className="snapshot-task-number"><span>任务编号</span><small>Task number：</small><strong>{orderNum}</strong></div></div> }
-function ChangedText({ value, previous, compare }) {
-  const changed = compare && text(value) !== text(previous)
+function ChangedText({ value, previous, compare, forceChanged = false }) {
+  const changed = compare && (forceChanged || text(value) !== text(previous))
   const displayValue = value === null || value === undefined || value === '' ? (changed ? '—' : '') : value
   return <span className={changed ? 'snapshot-changed-value' : ''}>{displayValue}</span>
 }
@@ -409,8 +483,17 @@ function normalizePacket(packet = {}, meta = {}) {
     salesUserId: template.sales_user_id || snapshot.salesUserId || '', salesName: template.sales_name || snapshot.salesName || '', salesEmail: template.sales_email || snapshot.salesEmail || '', salesPhone: template.sales_phone || snapshot.salesPhone || '', salesSignatureDate: meta?.original_sales_signature_date || meta?.original_application_date || template.sales_signature_date || '', customerSignatureDate: meta?.original_customer_signature_date || meta?.original_application_date || template.customer_signature_date || '',
     urgency: form.orderUrgencyType || order.order_urgency_type || 'normal', deliveryDays: form.deliveryDays ?? order.delivery_days_after_receipt ?? '', reportTypes: asArray(form.reportType).length ? form.reportType : asArray(report.type), seals: asArray(form.reportSeals).length ? form.reportSeals : asArray(order.report_seals), paperShipping: form.paperReportShippingType || report.paper_report_shipping_type || '', reportAdditionalInfo: form.reportAdditionalInfo || report.report_additional_info || '', reportHeader: form.reportHeader || report.header_type || '', reportHeaderOther: form.reportHeaderAdditionalInfo || report.header_other || '', reportForm: form.reportForm || report.format_type || '',
     items: normalizeItems(sourceItems),
-    otherRequirements: form.otherRequirements || order.other_requirements || '', subcontractingNotAccepted: Boolean(form.subcontractingNotAccepted ?? order.subcontracting_not_accepted), hazards: asArray(requirements.hazards), hazardOther: requirements.hazardOther || requirements.hazard_other || '', magnetism: requirements.magnetism || '', conductivity: requirements.conductivity || '', breakable: requirements.breakable || '', brittle: requirements.brittle || '', handlingType: form.sampleSolutionType || handling.handling_type || '', returnAddressOption: form.sampleReturnInfo?.returnAddressOption || handling.return_info?.returnAddressOption || '', returnAddress: form.sampleReturnInfo?.returnAddress || handling.return_info?.returnAddress || ''
+    flowRequired: form.flowRequired || (order.requires_flow != null ? (order.requires_flow ? 'yes' : 'no') : ((form.flowNote || order.flow_note) ? 'yes' : 'no')), flowNote: form.flowNote || order.flow_note || '', otherRequirements: form.otherRequirements || order.other_requirements || '', subcontractingNotAccepted: Boolean(form.subcontractingNotAccepted ?? order.subcontracting_not_accepted), hazards: asArray(requirements.hazards), hazardOther: requirements.hazardOther || requirements.hazard_other || '', magnetism: requirements.magnetism || '', conductivity: requirements.conductivity || '', breakable: requirements.breakable || '', brittle: requirements.brittle || '', handlingType: form.sampleSolutionType || handling.handling_type || '', returnAddressOption: form.sampleReturnInfo?.returnAddressOption || handling.return_info?.returnAddressOption || '', returnAddress: form.sampleReturnInfo?.returnAddress || handling.return_info?.returnAddress || ''
   }
+}
+
+function packetHasFlowSettings(packet = {}) {
+  const form = packet?.formSnapshot?.formData
+  const order = packet?.commissionData?.orderInfo
+  return Object.prototype.hasOwnProperty.call(form || {}, 'flowRequired')
+    || Object.prototype.hasOwnProperty.call(form || {}, 'flowNote')
+    || Object.prototype.hasOwnProperty.call(order || {}, 'requires_flow')
+    || Object.prototype.hasOwnProperty.call(order || {}, 'flow_note')
 }
 
 function normalizeItems(sourceItems) {
@@ -421,11 +504,28 @@ function normalizeItems(sourceItems) {
     sampleType: sampleTypeText(item.sampleType ?? item.sample_type, item.sampleTypeCustom ?? item.sample_type_custom),
     originalNo: text(item.original_no ?? item.originalNo),
     testItem: text(item.test_item ?? item.testItem),
-    method: text(item.test_method ?? item.testMethod),
+    method: text(item.test_method ?? item.testMethod ?? item.standard_code),
     quantity: text(item.quantity),
     note: text(item.note ?? item.remarks),
-    isAddOn: item.is_add_on === true || Number(item.is_add_on ?? item.isAddOn) === 1
+    cancelled: Boolean(item.cancelled_in_additional_test ?? item.cancelled),
+    cancelledAt: item.cancelled_at ?? item.cancelledAt ?? null,
+    restored: Boolean(item.restored_in_additional_test ?? item.restored),
+    restoredAt: item.restored_at ?? item.restoredAt ?? null,
+    isAddOn: item.is_add_on === true || Number(item.is_add_on ?? item.isAddOn) === 1,
+    modifiedFields: asArray(item.modified_fields ?? item._modifiedFields)
   }))
+}
+
+function itemFieldWasModified(item, ...fieldNames) {
+  const modifiedFields = new Set(asArray(item?.modifiedFields))
+  return fieldNames.some((fieldName) => modifiedFields.has(fieldName))
+}
+
+function itemHasChanges(item, previousItem) {
+  if (asArray(item?.modifiedFields).length) return true
+  if (!previousItem) return false
+  return ['sampleName', 'material', 'sampleType', 'originalNo', 'testItem', 'method', 'quantity', 'note']
+    .some((field) => text(item?.[field]) !== text(previousItem?.[field]))
 }
 
 function previousItemFor(item, index, previousItems) {
@@ -441,6 +541,13 @@ function itemFingerprint(item = {}) {
   return [item.sampleName, item.material, item.sampleType, item.originalNo, item.testItem, item.method, item.quantity]
     .map((value) => text(value).trim().toLocaleLowerCase())
     .join('\u001f')
+}
+
+function samePreviewItem(left = {}, right = {}) {
+  if (left.testItemId != null && right.testItemId != null) {
+    return String(left.testItemId) === String(right.testItemId)
+  }
+  return itemFingerprint(left) === itemFingerprint(right)
 }
 
 function sampleTypeText(value, custom) { const labels = { 1:'板材', 2:'棒材', 3:'粉末', 4:'液体', 5:'其他' }; return custom || labels[value] || text(value) }

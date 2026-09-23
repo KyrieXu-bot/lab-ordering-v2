@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { calculateQrPlacement, sampleFlowTokenPersistencePlan } = require('./sampleFlowQr');
+const { buildSampleFlowScanUrl, calculateQrPlacement, createSampleFlowToken, sampleFlowTokenPersistencePlan } = require('./sampleFlowQr');
 
 const MM_TO_POINTS = 72 / 25.4;
 
@@ -38,4 +38,13 @@ test('加测或修改 PDF 复用原申请二维码但不向后续申请重复写
     writeCurrentToken: false,
     writeBaseToken: true
   });
+});
+
+test('样品流转 token 使用统一的 SF 随机格式', () => {
+  const first = createSampleFlowToken();
+  const second = createSampleFlowToken();
+  assert.match(first, /^SF_[A-Za-z0-9_-]{24}$/);
+  assert.match(second, /^SF_[A-Za-z0-9_-]{24}$/);
+  assert.notEqual(first, second);
+  assert.match(buildSampleFlowScanUrl(first), new RegExp(`token=${first}$`));
 });

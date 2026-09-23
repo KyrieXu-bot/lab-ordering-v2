@@ -12,8 +12,15 @@
 .appendix-table tr.snapshot-added-item td{border-top:2px solid #daa33b!important;border-bottom:2px solid #daa33b!important;background:#fff8de}
 .appendix-table tr.snapshot-added-item td:first-child{border-left:2px solid #daa33b!important}
 .appendix-table tr.snapshot-added-item td:last-child{border-right:2px solid #daa33b!important}
-.has-modification-traces tr:has(.snapshot-changed-value,.is-selected-change,.is-previous-choice),.appendix-table tr.snapshot-added-item{position:relative}
+.appendix-table tr.snapshot-cancelled-item td{position:relative;background:#fff2f0;color:#80645f}
+.appendix-table tr.snapshot-cancelled-item td::after{content:"";position:absolute;z-index:2;right:0;left:0;top:50%;border-top:2px solid #b5554c;pointer-events:none}
+.has-modification-traces tr:has(.snapshot-changed-value,.is-selected-change,.is-previous-choice),.appendix-table tr.snapshot-added-item,.appendix-table tr.snapshot-modified-item{position:relative}
 .has-modification-traces tr:has(.snapshot-changed-value,.is-selected-change,.is-previous-choice)::after,.snapshot-trace-annotation{position:absolute;right:-154px;top:50%;box-sizing:border-box;width:140px;padding:6px 8px;border-left:3px solid #b86e53;border-radius:0 7px 7px 0;background:#fff4ee;color:#884a36;font:600 11px/1.4 "Microsoft YaHei",sans-serif;box-shadow:0 3px 10px rgba(88,52,40,.12);transform:translateY(-50%);white-space:normal}
 .has-modification-traces tr:has(.snapshot-changed-value,.is-selected-change,.is-previous-choice)::after{content:var(--snapshot-modification-note)}
-.snapshot-trace-annotation{display:block}
+.has-modification-traces .appendix-table tr.snapshot-modified-item::after{content:none}
+.snapshot-trace-annotation{z-index:3;display:block}
+.snapshot-trace-annotation.is-modification{border-left-color:#b86e53;background:#fff4ee;color:#884a36}
+.snapshot-trace-annotation.is-cancelled{border-left-color:#a9473f;background:#fff0ee;color:#8e3731}
+.snapshot-trace-annotation.is-restored{border-left-color:#438261;background:#eef9f3;color:#32694c}
+@media(max-width:1350px){.appendix-table .snapshot-trace-annotation{position:static;width:100%;margin-top:5px;padding:4px 5px;transform:none}}
 @media(max-width:800px){.order-preview-backdrop{padding:6px}.order-preview-modal{width:calc(100vw - 12px);height:calc(100vh - 12px)}.order-preview-scroll{padding:10px}.order-preview-paper{width:1000px}}

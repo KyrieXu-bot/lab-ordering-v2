@@ -9,7 +9,7 @@ const { requireSales, requireReviewer, isReviewer } = require('../middleware/aut
 const { createCommissionFromPayload } = require('./commission');
 const { generateOrderTemplateBuffer } = require('../services/orderTemplate');
 const { convertDocxToPdf } = require('../services/pdfConversion');
-const { addSampleFlowQrToPdf, sampleFlowTokenPersistencePlan } = require('../services/sampleFlowQr');
+const { addSampleFlowQrToPdf, createSampleFlowToken, sampleFlowTokenPersistencePlan } = require('../services/sampleFlowQr');
 const { appendRequestImagesToPdf, detectSupportedImageType } = require('../services/orderAttachmentImages');
 const { syncRequestSalesperson, signatureExists, formatLocalDate } = require('../services/salesSignature');
 const { commissionerSignatureExists } = require('../services/commissionerSignature');
@@ -31,8 +31,9 @@ const {
 const router = express.Router();
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
 const requestAttachmentStagingRoot = path.join(uploadsRoot, '.order-request-staging');
-// 存储文件名中的内容版本标记，用于让本修复上线前生成的修改版 PDF 自动失效一次。
-const MODIFICATION_PDF_STORAGE_REVISION = '-modification-items-v2';
+// 存储文件名中的内容版本标记，用于让本修复上线前生成的 PDF 自动失效一次。
+// 只影响服务器内部文件名，用户下载时仍使用正常业务文件名。
+const ORDER_REQUEST_PDF_STORAGE_REVISION = '-request-items-v6';
 const requestAttachmentUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, callback) => {
@@ -58,7 +59,7 @@ async function getOriginalApplicationSignatureMetadata(queryable, orderId) {
     `SELECT submitted_payload, DATE_FORMAT(submitted_at, '%Y-%m-%d') AS application_date
      FROM order_requests
      WHERE request_type = 'normal' AND approved_order_id = ? AND status = 'approved'
-     ORDER BY request_id LIMIT 1`,
+     ORDER BY request_id LIMIT 1 FOR UPDATE`,
     [orderId]
   );
   if (!originalRequest) return null;
@@ -97,6 +98,99 @@ function receiveRequestAttachment(req, res, next) {
 function parseJson(value) {
   if (value == null || typeof value === 'object') return value;
   try { return JSON.parse(value); } catch (_) { return null; }
+}
+
+function applicationPrefillPayload(row = {}) {
+  return parseJson(row.submitted_payload) || parseJson(row.reviewed_payload);
+}
+
+function applicationItems(payload = {}) {
+  const snapshot = payload.formSnapshot || {};
+  if (Array.isArray(snapshot.businessTestItems)) return snapshot.businessTestItems;
+  if (Array.isArray(snapshot.formData?.testItems)) return snapshot.formData.testItems;
+  return Array.isArray(payload.commissionData?.testItems) ? payload.commissionData.testItems : [];
+}
+
+function applicationItemKey(item = {}) {
+  return [
+    item.sampleName ?? item.sample_name,
+    item.material,
+    item.original_no ?? item.originalNo,
+    item.test_item,
+    item.test_method ?? item.testMethod,
+    item.quantity
+  ].map((value) => String(value ?? '').trim().toLowerCase()).join('\u0001');
+}
+
+function editableApplicationItem(item = {}) {
+  return Object.fromEntries(Object.entries(item).filter(([key]) => !key.startsWith('_')));
+}
+
+function isCancellationRestore(item = {}) {
+  return Boolean(item.restored_in_additional_test || item.restored);
+}
+
+function isCurrentlyCancelled(item = {}) {
+  return Boolean(item.cancelled_in_additional_test || item.cancelled) && !isCancellationRestore(item);
+}
+
+function sameApplicationItem(left = {}, right = {}) {
+  const leftId = left.test_item_id ?? left.testItemId;
+  const rightId = right.test_item_id ?? right.testItemId;
+  if (leftId != null && rightId != null && String(leftId) === String(rightId)) return true;
+  return applicationItemKey(left) === applicationItemKey(right);
+}
+
+function withoutCancelledItems(items = [], cancellationStates = items) {
+  return items.filter((item) => {
+    const state = cancellationStates.find((candidate) => sameApplicationItem(item, candidate));
+    return !state || !isCurrentlyCancelled(state);
+  });
+}
+
+function cumulativeAdditionalItemStates(rows = []) {
+  const states = [];
+  [...rows]
+    .filter((row) => row.request_type === 'additional_test' && row.status === 'approved' && row.applied_at)
+    .sort((a, b) => Number(a.request_id) - Number(b.request_id))
+    .forEach((row) => {
+      applicationItems(applicationPrefillPayload(row) || {}).forEach((item) => {
+        const cancelled = Boolean(item.cancelled_in_additional_test || item.cancelled);
+        const restored = isCancellationRestore(item);
+        if (!cancelled && !restored) return;
+        const nextState = {
+          ...editableApplicationItem(item),
+          cancelled_in_additional_test: cancelled && !restored,
+          cancelled_at: cancelled && !restored ? (item.cancelled_at || item.cancelledAt || row.applied_at) : null,
+          restored_in_additional_test: restored,
+          restored_at: restored ? (item.restored_at || item.restoredAt || row.applied_at) : null
+        };
+        const existingIndex = states.findIndex((state) => sameApplicationItem(state, item));
+        if (existingIndex >= 0) states[existingIndex] = nextState;
+        else states.push(nextState);
+      });
+    });
+  return states;
+}
+
+function cumulativeApplicationItems(rows = []) {
+  const orderedRows = [...rows].sort((a, b) => Number(b.request_id) - Number(a.request_id));
+  const baselineRow = orderedRows.find((row) => row.request_type !== 'additional_test' && applicationPrefillPayload(row));
+  const items = applicationItems(applicationPrefillPayload(baselineRow) || {}).map(editableApplicationItem);
+  const additions = orderedRows
+    .filter((row) => row.request_type === 'additional_test' && row.status === 'approved' && row.applied_at)
+    .sort((a, b) => Number(a.request_id) - Number(b.request_id));
+  additions.forEach((row) => {
+    applicationItems(applicationPrefillPayload(row) || {}).forEach((addition) => {
+      const existingIndex = items.findIndex((item) => sameApplicationItem(item, addition));
+      if (addition.cancelled_in_additional_test || addition.cancelled) {
+        if (existingIndex >= 0) items.splice(existingIndex, 1);
+      } else if (isCancellationRestore(addition)) {
+        if (existingIndex < 0) items.push(editableApplicationItem(addition));
+      } else if (existingIndex < 0) items.push(editableApplicationItem(addition));
+    });
+  });
+  return items;
 }
 
 function requestNumber(id) {
@@ -142,6 +236,31 @@ function safeFilePart(value, fallback = '未填写') {
   return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
 }
 
+function compactFilenameDate(value) {
+  const digits = String(value || '').replace(/\D/g, '').slice(0, 8);
+  return digits.length === 8 ? digits : String(formatLocalDate()).replace(/\D/g, '').slice(0, 8);
+}
+
+function appendOrderDateToPdfFilename(filename, orderDate) {
+  const safeName = path.basename(String(filename || '委托单.pdf'));
+  const extension = path.extname(safeName) || '.pdf';
+  const stem = path.basename(safeName, path.extname(safeName));
+  const date = compactFilenameDate(orderDate);
+  if (new RegExp(`(?:^|-)${date}(?:-|$)`).test(stem)) return `${stem}${extension}`;
+  const addOnSuffix = stem.endsWith('-加测') ? '-加测' : '';
+  const baseStem = addOnSuffix ? stem.slice(0, -addOnSuffix.length) : stem;
+  return `${baseStem}-${date}${addOnSuffix}${extension}`;
+}
+
+function removeOrderDateFromPdfFilename(filename) {
+  const safeName = path.basename(String(filename || '委托单.pdf'));
+  const extension = path.extname(safeName) || '.pdf';
+  const stem = path.basename(safeName, path.extname(safeName));
+  const addOnSuffix = stem.endsWith('-加测') ? '-加测' : '';
+  const baseStem = addOnSuffix ? stem.slice(0, -addOnSuffix.length) : stem;
+  return `${baseStem.replace(/-\d{8}$/, '')}${addOnSuffix}${extension}`;
+}
+
 function buildFlowDocumentFilename(orderId) {
   return `${safeFilePart(orderId, '委托单')}-流转单.docx`;
 }
@@ -151,8 +270,13 @@ function buildRequirementDownloadFilename(orderId, originalFilename) {
   return `${safeFilePart(orderId, '委托单')}-需求单${extension}`;
 }
 
-function reviewerOrderBySql(displayOrderSql) {
+function reviewerOrderBySql(displayOrderSql, urgencySql = 'order_urgency_type') {
   return `ORDER BY
+           CASE
+             WHEN r.status = 'submitted' AND ${urgencySql} = 'urgent_2x' THEN 0
+             WHEN r.status = 'submitted' AND ${urgencySql} = 'urgent_1_5x' THEN 1
+             ELSE 2
+           END,
            CASE WHEN ${displayOrderSql} IS NULL THEN 0 ELSE 1 END,
            ${displayOrderSql} ASC,
            r.request_id ASC`;
@@ -210,6 +334,7 @@ async function nextVersionedPdfPaths(absoluteDir, baseName) {
 }
 
 async function canAccessRequest(row, user, connection = pool) {
+  if (row.status === 'draft') return row.applicant_user_id === user.user_id;
   if (isReviewer(user) || row.applicant_user_id === user.user_id) return true;
   const requestId = row.request_id;
   if (!requestId) return false;
@@ -234,6 +359,53 @@ function workflowStatusSql(alias = 'r') {
     WHEN ${alias}.status = 'approved' THEN 'pending_open'
     ELSE ${alias}.status
   END)`;
+}
+
+function followUpBlocksNewVersion(row = {}) {
+  if (!['modification', 'additional_test'].includes(row.request_type)) return false;
+  if (['submitted', 'returned'].includes(row.status)) return true;
+  return row.request_type === 'additional_test' && row.status === 'approved' && !row.applied_at;
+}
+
+async function findBlockingFollowUp(conn, orderId, excludeRequestId = null, beforeRequestId = null) {
+  const params = [orderId];
+  let exclusions = '';
+  if (excludeRequestId != null) {
+    exclusions += ' AND request_id <> ?';
+    params.push(excludeRequestId);
+  }
+  if (beforeRequestId != null) {
+    exclusions += ' AND request_id < ?';
+    params.push(beforeRequestId);
+  }
+  const [[row]] = await conn.query(
+    `SELECT request_id, request_type, status, applied_at
+     FROM order_requests
+     WHERE target_order_id = ?${exclusions}
+       AND request_type IN ('modification', 'additional_test')
+       AND (
+         status IN ('submitted', 'returned')
+         OR (request_type = 'additional_test' AND status = 'approved' AND applied_at IS NULL)
+       )
+     ORDER BY request_id LIMIT 1`,
+    params
+  );
+  return row || null;
+}
+
+async function assertFollowUpBaselineCurrent(conn, row) {
+  if (!row?.target_order_id || !row?.submitted_at) return;
+  const [[newerApplied]] = await conn.query(
+    `SELECT request_id, request_type
+     FROM order_requests
+     WHERE target_order_id = ? AND request_id <> ? AND applied_at IS NOT NULL
+       AND applied_at > ?
+     ORDER BY applied_at DESC, request_id DESC LIMIT 1 FOR UPDATE`,
+    [row.target_order_id, row.request_id, row.submitted_at]
+  );
+  if (newerApplied) {
+    throw Object.assign(new Error('该委托单在本申请提交后已有新版本生效，请撤回或刷新后重新发起申请'), { status: 409 });
+  }
 }
 
 async function addEvent(conn, requestId, userId, eventType, note = null) {
@@ -364,7 +536,7 @@ router.get('/', async (req, res, next) => {
     const paginationRequested = req.query.page !== undefined || req.query.page_size !== undefined;
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(100, Math.max(1, Number.parseInt(req.query.page_size, 10) || 20));
-    const allowedStatuses = new Set(['submitted', 'pending_open', 'opened', 'returned', 'withdrawn']);
+    const allowedStatuses = new Set(['draft', 'submitted', 'pending_open', 'opened', 'returned', 'withdrawn']);
     const allowedRequestTypes = new Set(['normal', 'additional_test', 'modification']);
     const requestedStatus = String(req.query.status || '').trim();
     const requestedType = String(req.query.request_type || '').trim();
@@ -381,11 +553,14 @@ router.get('/', async (req, res, next) => {
 
     const baseConditions = [];
     const baseParams = [];
-    if (!reviewer) {
-      baseConditions.push(`(r.applicant_user_id = ? OR EXISTS (
+    if (reviewer) {
+      // 草稿只属于创建它的业务员，绝不进入开单员申请队列或状态统计。
+      baseConditions.push("r.status <> 'draft'");
+    } else {
+      baseConditions.push(`(r.applicant_user_id = ? OR (r.status <> 'draft' AND EXISTS (
         SELECT 1 FROM payers access_payer
         WHERE access_payer.payer_id = r.payer_id AND access_payer.owner_user_id = ?
-      ))`);
+      )))`);
       baseParams.push(req.user.user_id, req.user.user_id);
     }
     if (requestedType) {
@@ -437,7 +612,7 @@ router.get('/', async (req, res, next) => {
       'normal'
     )`;
     const orderBy = reviewer
-      ? reviewerOrderBySql(displayOrderSql)
+      ? reviewerOrderBySql(displayOrderSql, urgencySql)
       : `ORDER BY CASE WHEN r.status = 'submitted' THEN 0 ELSE 1 END,
            r.submitted_at DESC, r.request_id DESC`;
     const limitSql = paginationRequested ? 'LIMIT ? OFFSET ?' : '';
@@ -447,13 +622,13 @@ router.get('/', async (req, res, next) => {
 
     if (!reviewer && String(req.query.grouped || '') === '1') {
       const groupKeySql = `COALESCE(${displayOrderSql}, CONCAT('REQUEST-', r.request_id))`;
-      const groupStatusSql = `SUBSTRING_INDEX(GROUP_CONCAT(${displayStatusSql} ORDER BY r.submitted_at DESC, r.request_id DESC), ',', 1)`;
+      const groupStatusSql = `SUBSTRING_INDEX(GROUP_CONCAT(${displayStatusSql} ORDER BY COALESCE(r.submitted_at, r.updated_at) DESC, r.request_id DESC), ',', 1)`;
       const groupHavingSql = requestedStatus ? `HAVING ${groupStatusSql} = ?` : '';
       const groupLimitSql = paginationRequested ? 'LIMIT ? OFFSET ?' : '';
       const groupedBaseParams = requestedStatus ? [...params, requestedStatus] : params;
       const groupParams = paginationRequested ? [...groupedBaseParams, pageSize, (page - 1) * pageSize] : groupedBaseParams;
       const [groupRows] = await pool.query(
-        `SELECT ${groupKeySql} AS group_key, MAX(r.submitted_at) AS latest_submitted_at
+        `SELECT ${groupKeySql} AS group_key, MAX(COALESCE(r.submitted_at, r.updated_at)) AS latest_submitted_at
          FROM order_requests r ${where}
          GROUP BY ${groupKeySql}
          ${groupHavingSql}
@@ -617,6 +792,42 @@ router.get('/', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// 业务端新申请的预填必须使用审批流中保存的 JSON 快照，
+// 避免 LIMS 正式开单时的二次录入改动业务员原始申请内容。
+router.get('/prefill', requireSales, async (req, res, next) => {
+  try {
+    const orderNum = String(req.query.orderNum || '').trim();
+    if (!orderNum) return res.status(400).json({ message: '请输入需要预填的委托单号' });
+    const [rows] = await pool.query(
+      `SELECT r.request_id, r.applicant_user_id, r.payer_id, r.request_type, r.status, r.applied_at,
+              r.submitted_payload, r.reviewed_payload, r.reviewed_at, r.submitted_at
+       FROM order_requests r
+       WHERE r.approved_order_id = ? OR r.target_order_id = ?
+       ORDER BY r.request_id DESC`,
+      [orderNum, orderNum]
+    );
+    let source = null;
+    const accessibleRows = [];
+    for (const row of rows) {
+      if (await canAccessRequest(row, req.user)) {
+        accessibleRows.push(row);
+        if (!source) source = row;
+      }
+    }
+    if (!source) return res.status(404).json({ message: '未找到可用的申请信息，请检查委托单号' });
+    // submitted_payload 是业务申请原始快照；reviewed_payload 可能已被开单员正式录入改写。
+    const payload = applicationPrefillPayload(source);
+    if (!payload) return res.status(409).json({ message: '该申请没有可用的 JSON 快照' });
+    res.json({
+      request_id: source.request_id,
+      request_no: requestNumber(source.request_id),
+      request_type: source.request_type,
+      payload,
+      cumulative_test_items: cumulativeApplicationItems(accessibleRows)
+    });
+  } catch (error) { next(error); }
+});
+
 router.post('/', requireSales, async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -666,6 +877,96 @@ router.post('/', requireSales, async (req, res, next) => {
   } finally { conn.release(); }
 });
 
+router.post('/draft', requireSales, async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    const requestPayload = req.body?.payload;
+    if (!requestPayload || typeof requestPayload !== 'object' || Array.isArray(requestPayload)) {
+      return res.status(400).json({ message: '草稿内容格式不正确' });
+    }
+    const commissionData = requestPayload.commissionData || {};
+    await conn.beginTransaction();
+    const [result] = await conn.query(
+      `INSERT INTO order_requests
+        (applicant_user_id, status, request_type, customer_id, payer_id, commissioner_id,
+         submitted_payload, schema_version, submitted_at)
+       VALUES (?, 'draft', 'normal', ?, ?, ?, ?, 1, NULL)`,
+      [
+        req.user.user_id,
+        commissionData.customerId || null,
+        commissionData.paymentId || null,
+        commissionData.commissionerId || null,
+        JSON.stringify(requestPayload)
+      ]
+    );
+    await conn.query('UPDATE order_requests SET root_request_id = request_id WHERE request_id = ?', [result.insertId]);
+    await addEvent(conn, result.insertId, req.user.user_id, 'draft_saved', '首次保存草稿');
+    await conn.commit();
+    res.status(201).json({
+      request_id: result.insertId,
+      request_no: requestNumber(result.insertId),
+      status: 'draft',
+      version: 1
+    });
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    next(error);
+  } finally { conn.release(); }
+});
+
+router.put('/:id/draft', requireSales, async (req, res, next) => {
+  const conn = await pool.getConnection();
+  try {
+    const requestPayload = req.body?.payload;
+    const expectedVersion = Number(req.body?.version);
+    if (!requestPayload || typeof requestPayload !== 'object' || Array.isArray(requestPayload)) {
+      return res.status(400).json({ message: '草稿内容格式不正确' });
+    }
+    if (!Number.isInteger(expectedVersion)) return res.status(400).json({ message: '草稿版本信息缺失，请刷新后重试' });
+    const commissionData = requestPayload.commissionData || {};
+    await conn.beginTransaction();
+    const [[row]] = await conn.query(
+      `SELECT request_id, applicant_user_id, status, request_type, version
+       FROM order_requests WHERE request_id = ? FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!row) throw Object.assign(new Error('草稿不存在'), { status: 404 });
+    if (row.applicant_user_id !== req.user.user_id) throw Object.assign(new Error('无权修改该草稿'), { status: 403 });
+    if (row.status !== 'draft' || row.request_type !== 'normal') {
+      throw Object.assign(new Error('当前申请已提交，不能再保存为草稿'), { status: 409 });
+    }
+    if (Number(row.version) !== expectedVersion) {
+      throw Object.assign(new Error('草稿内容已发生变化，请刷新后重新保存'), { status: 409 });
+    }
+    await conn.query(
+      `UPDATE order_requests
+       SET customer_id = ?, payer_id = ?, commissioner_id = ?, submitted_payload = ?,
+           schema_version = 1, version = version + 1
+       WHERE request_id = ?`,
+      [
+        commissionData.customerId || null,
+        commissionData.paymentId || null,
+        commissionData.commissionerId || null,
+        JSON.stringify(requestPayload),
+        row.request_id
+      ]
+    );
+    await addEvent(conn, row.request_id, req.user.user_id, 'draft_saved', '更新草稿');
+    await conn.commit();
+    res.json({
+      ok: true,
+      request_id: row.request_id,
+      request_no: requestNumber(row.request_id),
+      status: 'draft',
+      version: expectedVersion + 1
+    });
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    next(error);
+  } finally { conn.release(); }
+});
+
 router.post('/:id/follow-up', requireSales, async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
@@ -698,12 +999,14 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
     if (source.status !== 'approved') throw Object.assign(new Error('只有已通过的申请才能发起修改或加测'), { status: 409 });
     const targetOrderId = source.approved_order_id || source.target_order_id;
     if (!targetOrderId) throw Object.assign(new Error('原申请尚未完成正式开单'), { status: 409 });
-    const [[activeFollowUp]] = await conn.query(
-      `SELECT request_id FROM order_requests
-       WHERE target_order_id = ? AND request_type = ? AND status = 'submitted' LIMIT 1 FOR UPDATE`,
-      [targetOrderId, requestType]
-    );
-    if (activeFollowUp) throw Object.assign(new Error(`该委托单已有待审批的${requestType === 'modification' ? '修改' : '加测'}申请`), { status: 409 });
+    const [[orderLock]] = await conn.query('SELECT order_id FROM orders WHERE order_id = ? FOR UPDATE', [targetOrderId]);
+    if (!orderLock) throw Object.assign(new Error('关联的正式委托单不存在'), { status: 409 });
+    const activeFollowUp = await findBlockingFollowUp(conn, targetOrderId);
+    if (activeFollowUp) {
+      const typeLabel = activeFollowUp.request_type === 'modification' ? '修改' : '加测';
+      const stageLabel = activeFollowUp.status === 'approved' ? '已审批、待正式录入' : '尚未处理完成';
+      throw Object.assign(new Error(`该委托单已有${stageLabel}的${typeLabel}申请，请先完成上一版本`), { status: 409 });
+    }
     requestPayload.workflow = {
       ...(requestPayload.workflow || {}),
       requestType,
@@ -767,7 +1070,7 @@ router.put('/:id', requireSales, async (req, res, next) => {
     await conn.beginTransaction();
     const [[row]] = await conn.query(
       `SELECT request_id, applicant_user_id, status, request_type, target_order_id, approved_order_id,
-              submitted_payload, version
+              submitted_payload, submitted_at, version
        FROM order_requests
        WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
@@ -776,11 +1079,14 @@ router.put('/:id', requireSales, async (req, res, next) => {
     if (row.applicant_user_id !== req.user.user_id) {
       throw Object.assign(new Error('无权修改该申请'), { status: 403 });
     }
-    if (!['submitted', 'returned'].includes(row.status)) {
+    if (!['draft', 'submitted', 'returned'].includes(row.status)) {
       throw Object.assign(new Error('该申请已被处理，不能再修改'), { status: 409 });
     }
     if (Number(row.version) !== expectedVersion) {
       throw Object.assign(new Error('申请内容已发生变化，请刷新后重新修改'), { status: 409 });
+    }
+    if (['modification', 'additional_test'].includes(row.request_type)) {
+      await assertFollowUpBaselineCurrent(conn, row);
     }
     if (['modification', 'additional_test'].includes(row.request_type)) {
       await preserveOriginalApplicationSignatureDates(conn, requestPayload, row.target_order_id || row.approved_order_id);
@@ -796,7 +1102,7 @@ router.put('/:id', requireSales, async (req, res, next) => {
 
     await conn.query(
       `UPDATE order_requests
-       SET submitted_at = IF(status = 'returned', CURRENT_TIMESTAMP(3), submitted_at),
+       SET submitted_at = IF(status IN ('draft', 'returned'), CURRENT_TIMESTAMP(3), submitted_at),
            status = 'submitted', reviewer_user_id = NULL, review_note = NULL, reviewed_at = NULL,
            customer_id = ?, payer_id = ?, commissioner_id = ?, submitted_payload = ?,
            schema_version = 1, version = version + 1
@@ -809,7 +1115,13 @@ router.put('/:id', requireSales, async (req, res, next) => {
         row.request_id
       ]
     );
-    await addEvent(conn, row.request_id, req.user.user_id, 'submitted', '业务修改申请');
+    await addEvent(
+      conn,
+      row.request_id,
+      req.user.user_id,
+      'submitted',
+      row.status === 'draft' ? '草稿正式提交' : '业务修改申请'
+    );
     await conn.commit();
     res.json({ ok: true, status: 'submitted', version: expectedVersion + 1 });
   } catch (error) {
@@ -851,7 +1163,7 @@ router.get('/:id/files', async (req, res, next) => {
     );
     res.json(files.map((file) => ({
       ...file,
-      can_delete: requestRow.status === 'submitted'
+      can_delete: ['draft', 'submitted'].includes(requestRow.status)
         ? true
         : requestRow.status === 'returned' && !isReviewer(req.user)
     })));
@@ -872,11 +1184,8 @@ router.post('/:id/files', receiveRequestAttachment, async (req, res, next) => {
     );
     if (!row) throw Object.assign(new Error('申请不存在'), { status: 404 });
     if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权上传该申请附件'), { status: 403 });
-    if (row.request_type === 'additional_test') {
-      throw Object.assign(new Error('加测申请附件仅支持查看和下载'), { status: 409 });
-    }
     const reviewer = isReviewer(req.user);
-    const canUpload = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
+    const canUpload = ['draft', 'submitted'].includes(row.status) || (row.status === 'returned' && !reviewer);
     if (!canUpload) throw Object.assign(new Error('当前申请状态不能上传附件'), { status: 409 });
 
     const attachmentKind = String(req.body?.kind || 'test_requirement').trim();
@@ -987,11 +1296,8 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
     );
     if (!row) throw Object.assign(new Error('附件不存在'), { status: 404 });
     if (!await canAccessRequest(row, req.user, conn)) throw Object.assign(new Error('无权删除该申请附件'), { status: 403 });
-    if (row.request_type === 'additional_test') {
-      throw Object.assign(new Error('加测申请附件仅支持查看和下载'), { status: 409 });
-    }
     const reviewer = isReviewer(req.user);
-    const canDelete = row.status === 'submitted' || (row.status === 'returned' && !reviewer);
+    const canDelete = ['draft', 'submitted'].includes(row.status) || (row.status === 'returned' && !reviewer);
     if (!canDelete) throw Object.assign(new Error(
       row.file_type === 'request_image' ? '审批通过后的附件图片不能删除' : '审批通过后的测试需求单请在 LIMS 中删除'
     ), { status: 409 });
@@ -1028,8 +1334,10 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       `SELECT r.request_id, r.applicant_user_id, r.status, r.request_type, r.approved_order_id,
               r.target_order_id, r.applied_at, r.reviewed_payload, r.submitted_payload,
               r.attachment_file_id, r.sample_flow_token,
+              DATE_FORMAT(o.created_at, '%Y%m%d') AS order_date,
               attachment.original_filename AS attachment_filename, attachment.created_at AS attachment_created_at
        FROM order_requests r
+       LEFT JOIN orders o ON o.order_id = COALESCE(r.approved_order_id, r.target_order_id)
        LEFT JOIN order_request_files attachment ON attachment.file_id = r.attachment_file_id
        WHERE r.request_id = ?`,
       [req.params.id]
@@ -1127,7 +1435,7 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     );
     const pdfIsCurrent = currentPdf?.created_at
       && new Date(currentPdf.created_at).getTime() >= latestChangeAt
-      && (!latestModification || String(currentPdf.stored_path || '').includes(MODIFICATION_PDF_STORAGE_REVISION));
+      && String(currentPdf.stored_path || '').includes(ORDER_REQUEST_PDF_STORAGE_REVISION);
     if (currentPdf && pdfIsCurrent) {
       const [[linkedFile]] = await conn.query(
         `SELECT COUNT(DISTINCT test_item_id) AS linked_count
@@ -1150,35 +1458,19 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
 
     const orderId = safeFilePart(orderIdValue, '委托单');
     const hasAdditionalTest = additionalTests.length > 0;
-    let filenameSource = currentPdf;
-    if (!filenameSource) {
-      [[filenameSource]] = await conn.query(
-        `SELECT f.original_filename
-         FROM order_request_files f
-         JOIN order_requests owner_request ON owner_request.request_id = f.request_id
-         WHERE f.file_type = 'application_pdf'
-           AND COALESCE(owner_request.approved_order_id, owner_request.target_order_id) = ?
-         ORDER BY f.created_at DESC, f.file_id DESC LIMIT 1`,
-        [orderIdValue]
-      );
-    }
-    const existingStem = filenameSource?.original_filename
-      ? path.basename(filenameSource.original_filename, path.extname(filenameSource.original_filename)).replace(/-加测$/, '')
-      : '';
     const customerName = safeFilePart(baseSubmittedPayload?.formSnapshot?.selectedCustomer?.customer_name, '委托方');
     const contactName = safeFilePart(baseSubmittedPayload?.formSnapshot?.selectedCustomer?.contact_name, '联系人');
-    const stableBaseName = safeFilePart(existingStem, `${orderId}-${customerName}-${contactName}`);
+    const orderDate = compactFilenameDate(row.order_date || baseRequest.application_date);
+    const stableBaseName = `${orderId}-${customerName}-${contactName}-${orderDate}`;
     const baseName = `${stableBaseName}${hasAdditionalTest ? '-加测' : ''}`;
     const relativeDir = path.join('order-requests', orderId);
     const absoluteDir = path.join(__dirname, '..', '..', 'uploads', relativeDir);
     await fs.mkdir(absoluteDir, { recursive: true });
-    const storageNameSeed = latestModification
-      ? `${baseName}${MODIFICATION_PDF_STORAGE_REVISION}`
-      : baseName;
+    const storageNameSeed = `${baseName}${ORDER_REQUEST_PDF_STORAGE_REVISION}`;
     const { storageBaseName, docxPath, pdfPath } = await nextVersionedPdfPaths(absoluteDir, storageNameSeed);
     createdPaths.push(docxPath, pdfPath);
 
-    const sampleFlowToken = baseRequest.sample_flow_token || row.sample_flow_token || `SF_${crypto.randomBytes(18).toString('base64url')}`;
+    const sampleFlowToken = baseRequest.sample_flow_token || row.sample_flow_token || createSampleFlowToken();
 
     const docxBuffer = await generateOrderTemplateBuffer(templateData);
     await fs.writeFile(docxPath, docxBuffer);
@@ -1347,7 +1639,20 @@ router.get('/:id/flow-document', async (req, res, next) => {
       || parseJson(row.submitted_payload)
       || {};
     const items = await getOrderTestItemsForFlow(pool, orderId);
-    const flowData = buildProcessTemplateData(packet, orderId, items);
+    const [additionalRequests] = await pool.query(
+      `SELECT request_id, request_type, status, applied_at, submitted_payload, reviewed_payload
+       FROM order_requests
+       WHERE target_order_id = ? AND request_type = 'additional_test'
+         AND status = 'approved' AND applied_at IS NOT NULL
+       ORDER BY request_id`,
+      [orderId]
+    );
+    const cancellationStates = cumulativeAdditionalItemStates(additionalRequests);
+    const flowData = buildProcessTemplateData(
+      packet,
+      orderId,
+      withoutCancelledItems(items, cancellationStates)
+    );
     const buffer = await generateProcessTemplateBuffer(flowData);
     const filename = buildFlowDocumentFilename(orderId);
     res.type('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -1367,9 +1672,10 @@ router.get('/:id/test-items-document', requireReviewer, async (req, res, next) =
     if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权导出该申请的检测项目' });
     const packet = parseJson(row.reviewed_payload) || parseJson(row.submitted_payload) || {};
     const snapshot = packet.formSnapshot || {};
-    const testItems = Array.isArray(snapshot.businessTestItems)
+    const snapshotItems = Array.isArray(snapshot.businessTestItems)
       ? snapshot.businessTestItems
       : (Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
+    const testItems = snapshotItems.filter((item) => !isCurrentlyCancelled(item));
     if (!testItems.length) return res.status(409).json({ message: '该申请没有可导出的业务检测项目' });
     const buffer = await generateTestItemsTemplateBuffer(testItems);
     const filename = `${requestNumber(row.request_id)}-业务申请检测项目.docx`;
@@ -1383,8 +1689,10 @@ router.get('/:id/attachment', async (req, res, next) => {
   try {
     const [[row]] = await pool.query(
       `SELECT r.request_id, r.applicant_user_id, r.attachment_file_id,
-              f.original_filename, f.stored_path, f.mime_type
+              f.original_filename, f.stored_path, f.mime_type,
+              DATE_FORMAT(o.created_at, '%Y%m%d') AS order_date
        FROM order_requests r
+       LEFT JOIN orders o ON o.order_id = COALESCE(r.approved_order_id, r.target_order_id)
        LEFT JOIN order_request_files f ON f.file_id = r.attachment_file_id
        WHERE r.request_id = ?`,
       [req.params.id]
@@ -1410,7 +1718,12 @@ router.get('/:id/attachment', async (req, res, next) => {
     }
     if (!filePath) return res.status(404).json({ message: '附件文件不存在' });
     res.type(row.mime_type || 'application/pdf');
-    res.download(filePath, row.original_filename);
+    const downloadFilename = row.mime_type === 'application/pdf'
+      ? (isReviewer(req.user)
+        ? removeOrderDateFromPdfFilename(row.original_filename)
+        : appendOrderDateToPdfFilename(row.original_filename, row.order_date))
+      : row.original_filename;
+    res.download(filePath, downloadFilename);
   } catch (error) {
     if (error.code === 'ENOENT') return res.status(404).json({ message: '附件文件不存在' });
     next(error);
@@ -1433,7 +1746,7 @@ router.get('/:id', async (req, res, next) => {
     }
     const relatedOrderId = row.approved_order_id || row.target_order_id || extractReservedOrderId(row.reviewed_payload);
     const [relatedRows] = await pool.query(
-      `SELECT request_id
+      `SELECT request_id, request_type, status, applied_at, submitted_payload, reviewed_payload
        FROM order_requests
        WHERE request_id <> ?
          AND (
@@ -1444,6 +1757,13 @@ router.get('/:id', async (req, res, next) => {
       [row.request_id, row.root_request_id, row.request_id, relatedOrderId || null, relatedOrderId || null, relatedOrderId || null]
     );
     row.related_request_ids = relatedRows.map((item) => item.request_id);
+    row.additional_item_states = cumulativeAdditionalItemStates([
+      ...relatedRows,
+      row
+    ]);
+    row.blocking_follow_up = relatedOrderId
+      ? await findBlockingFollowUp(pool, relatedOrderId, row.request_id)
+      : null;
     if (relatedOrderId) {
       const originalSignatureMetadata = await getOriginalApplicationSignatureMetadata(pool, relatedOrderId);
       if (originalSignatureMetadata) {
@@ -1543,12 +1863,22 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
     if (candidate.request_type !== 'normal') {
       await conn.beginTransaction();
       const [[followUp]] = await conn.query(
-        `SELECT request_id, status, request_type, target_order_id, version, submitted_payload
+        `SELECT request_id, status, request_type, target_order_id, version, submitted_at, submitted_payload
          FROM order_requests WHERE request_id = ? FOR UPDATE`,
         [req.params.id]
       );
       if (!followUp || followUp.status !== 'submitted') throw Object.assign(new Error('该申请已被处理'), { status: 409 });
       if (Number(followUp.version) !== expectedVersion) throw Object.assign(new Error('申请已被业务修改，请刷新后重新审核'), { status: 409 });
+      const earlierFollowUp = await findBlockingFollowUp(
+        conn,
+        followUp.target_order_id,
+        followUp.request_id,
+        followUp.request_id
+      );
+      if (earlierFollowUp) {
+        throw Object.assign(new Error('该委托单存在更早的修改或加测申请尚未完成，请按版本顺序处理'), { status: 409 });
+      }
+      await assertFollowUpBaselineCurrent(conn, followUp);
       const payload = parseJson(followUp.submitted_payload) || {};
       if (followUp.request_type === 'modification') {
         await applyOrderModification(conn, followUp.target_order_id, payload);
@@ -1658,7 +1988,8 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
 
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, status, request_type, target_order_id, approved_order_id, applied_at, reviewed_payload, version
+      `SELECT request_id, status, request_type, target_order_id, approved_order_id, applied_at,
+              submitted_at, reviewed_payload, version
        FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
@@ -1669,6 +2000,9 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
     }
     if (Number(row.version) !== expectedVersion) {
       throw Object.assign(new Error('申请内容已发生变化，请刷新后重新开单'), { status: 409 });
+    }
+    if (row.request_type === 'additional_test') {
+      await assertFollowUpBaselineCurrent(conn, row);
     }
     const reservedOrderId = row.request_type === 'additional_test'
       ? row.target_order_id
@@ -1730,9 +2064,17 @@ module.exports = {
   router,
   buildFlowDocumentFilename,
   buildRequirementDownloadFilename,
+  appendOrderDateToPdfFilename,
+  removeOrderDateFromPdfFilename,
   reviewerOrderBySql,
+  canAccessRequest,
   requestArrivalSummary,
   validateBusinessTestItemArrival,
+  applicationPrefillPayload,
+  cumulativeApplicationItems,
+  cumulativeAdditionalItemStates,
+  withoutCancelledItems,
+  followUpBlocksNewVersion,
   insertProjectFileLinks,
   linkExistingRequirementsToAddedTests
 };

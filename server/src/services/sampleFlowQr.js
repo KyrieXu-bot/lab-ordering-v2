@@ -1,9 +1,14 @@
 const fs = require('fs').promises;
+const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { PDFDocument } = require('pdf-lib');
 
 const DEFAULT_SCAN_URL = 'http://192.168.9.46:3003/sample-flow/scan';
 const MM_TO_POINTS = 72 / 25.4;
+
+function createSampleFlowToken() {
+  return `SF_${crypto.randomBytes(18).toString('base64url')}`;
+}
 
 function buildSampleFlowScanUrl(flowToken) {
   const baseUrl = String(process.env.SAMPLE_FLOW_SCAN_URL || DEFAULT_SCAN_URL).trim();
@@ -70,4 +75,4 @@ async function addSampleFlowQrToPdf(pdfPath, flowToken) {
   return { scanUrl, pageCount: pdf.getPageCount() };
 }
 
-module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl, calculateQrPlacement, sampleFlowTokenPersistencePlan };
+module.exports = { addSampleFlowQrToPdf, buildSampleFlowScanUrl, calculateQrPlacement, createSampleFlowToken, sampleFlowTokenPersistencePlan };
