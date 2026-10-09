@@ -53,6 +53,7 @@ function restrictNonRequestWrites(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   if (req.path.startsWith('/order-requests')) return next();
   if (req.path.startsWith('/commissioner-signatures')) return next();
+  if (req.path.startsWith('/notifications')) return next();
   return requireReviewer(req, res, next);
 }
 

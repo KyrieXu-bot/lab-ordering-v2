@@ -27,6 +27,7 @@ const { router: documentsRouter } = require('./routes/documents');
 const { router: templatesRouter } = require('./routes/templates');
 const { router: orderRequestsRouter } = require('./routes/orderRequests');
 const { router: commissionerSignaturesRouter } = require('./routes/commissionerSignatures');
+const { router: notificationsRouter } = require('./routes/notifications');
 
 const app = express();
 app.use(cors());
@@ -61,6 +62,7 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/templates', templatesRouter);
 app.use('/api/order-requests', orderRequestsRouter);
 app.use('/api/commissioner-signatures', commissionerSignaturesRouter);
+app.use('/api/notifications', notificationsRouter);
 
 if (process.env.NODE_ENV === 'production') {
   const clientDistPath = path.resolve(__dirname, '..', '..', 'client', 'dist');

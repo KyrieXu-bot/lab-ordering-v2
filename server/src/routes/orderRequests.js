@@ -18,15 +18,22 @@ const {
   originalApplicationSignatureDates,
   additionalTestsAfterModification
 } = require('../services/orderRequestPdfData');
-const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow } = require('../services/orderFollowUp');
+const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow, validateFormalModificationReview } = require('../services/orderFollowUp');
 const { buildProcessTemplateData, generateProcessTemplateBuffer } = require('../services/processTemplate');
 const { generateTestItemsTemplateBuffer } = require('../services/testItemsTemplate');
+const { buildRejectionSummaryWorkbook } = require('../services/rejectionSummaryWorkbook');
 const {
   allocateOrderId,
   buildApprovedPayload,
   extractReservedOrderId,
   targetOrderPrefix
 } = require('../services/orderNumberAllocation');
+const {
+  submittedNotification,
+  withdrawnNotification,
+  applicantNotification,
+  createNotification
+} = require('../services/notifications');
 
 const router = express.Router();
 const uploadsRoot = path.resolve(__dirname, '..', '..', 'uploads');
@@ -82,10 +89,12 @@ async function preserveOriginalApplicationSignatureDates(queryable, requestPaylo
 
 async function setModificationBaselineTestItems(queryable, requestPayload, orderId, existingPayload = null) {
   requestPayload.formSnapshot = requestPayload.formSnapshot || {};
-  const savedBaseline = existingPayload?.formSnapshot?.modificationBaselineTestItems;
-  requestPayload.formSnapshot.modificationBaselineTestItems = Array.isArray(savedBaseline) && savedBaseline.length
-    ? savedBaseline
-    : await getOrderTestItemsForFlow(queryable, orderId);
+  requestPayload.workflow = requestPayload.workflow || {};
+  requestPayload.workflow.requestType = 'modification';
+  // 业务项目与正式项目数量可能不同，禁止按行号建立绑定。
+  delete requestPayload.workflow.formalTestItemBindings;
+  for (const item of requestPayload.commissionData?.testItems || []) delete item.test_item_id;
+
 }
 
 function receiveRequestAttachment(req, res, next) {
@@ -104,11 +113,94 @@ function applicationPrefillPayload(row = {}) {
   return parseJson(row.submitted_payload) || parseJson(row.reviewed_payload);
 }
 
+function additionalSubmittedPayloadsForPdf(rows = []) {
+  return rows.map((row) => parseJson(row.submitted_payload) || {});
+}
+
 function applicationItems(payload = {}) {
   const snapshot = payload.formSnapshot || {};
   if (Array.isArray(snapshot.businessTestItems)) return snapshot.businessTestItems;
   if (Array.isArray(snapshot.formData?.testItems)) return snapshot.formData.testItems;
   return Array.isArray(payload.commissionData?.testItems) ? payload.commissionData.testItems : [];
+}
+
+// 正式检测项目只属于 LIMS。开单系统保留审批、开单等流程元数据，
+// 但任何持久化或返回前端的申请快照都必须继续使用业务提交的项目。
+function withoutFormalItems(reviewedPayload, submittedPayload) {
+  const reviewed = parseJson(reviewedPayload);
+  if (!reviewed) return reviewed;
+  const submitted = parseJson(submittedPayload) || {};
+  const businessItems = applicationItems(submitted).map(editableApplicationItem);
+  const next = JSON.parse(JSON.stringify(reviewed));
+  next.commissionData = next.commissionData || {};
+  next.commissionData.testItems = businessItems;
+  next.templateData = next.templateData || {};
+  next.templateData.testItems = businessItems;
+  next.formSnapshot = next.formSnapshot || {};
+  next.formSnapshot.businessTestItems = businessItems;
+  next.formSnapshot.formData = {
+    ...(next.formSnapshot.formData || {}),
+    testItems: businessItems
+  };
+  return next;
+}
+
+function withBusinessModificationBaseline(payload, baselineItems = []) {
+  const parsed = parseJson(payload);
+  if (!parsed) return parsed;
+  const next = JSON.parse(JSON.stringify(parsed));
+  next.formSnapshot = next.formSnapshot || {};
+  next.formSnapshot.modificationBaselineTestItems = baselineItems.map(editableApplicationItem);
+  return next;
+}
+
+function withBusinessModificationItems(payload, baselineItems = []) {
+  const parsed = parseJson(payload);
+  if (!parsed) return parsed;
+  const next = JSON.parse(JSON.stringify(parsed));
+  if (!baselineItems.length) return next;
+  const snapshot = next.formSnapshot || (next.formSnapshot = {});
+  const submittedItems = applicationItems(next);
+  const commissionItems = Array.isArray(next.commissionData?.testItems) ? next.commissionData.testItems : [];
+  const businessItems = baselineItems.map((baseline, index) => {
+    const submitted = submittedItems[index];
+    // 历史修改页曾从 LIMS 读取合并后的项目，可能只提交 1 行，而业务原申请有多行。
+    // 修改流程没有删行权限；未提交的基线行必须原样保留，不能生成空行或视为删除。
+    if (!submitted) return editableApplicationItem(baseline);
+    const modifiedFields = Array.isArray(submitted._modifiedFields)
+      ? submitted._modifiedFields
+      : commissionItems[index]?.modified_fields;
+    if (!Array.isArray(modifiedFields)) return editableApplicationItem(submitted);
+    const merged = { ...editableApplicationItem(baseline), _modifiedFields: [...modifiedFields] };
+    modifiedFields.forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(submitted, field)) merged[field] = submitted[field];
+    });
+    return merged;
+  });
+  snapshot.businessTestItems = businessItems;
+  snapshot.formData = { ...(snapshot.formData || {}), testItems: businessItems };
+  next.templateData = { ...(next.templateData || {}), testItems: businessItems };
+  return next;
+}
+
+function withoutLeakedFormalAdditionalItems(payload, baselineItems = []) {
+  const parsed = parseJson(payload);
+  if (!parsed) return parsed;
+  const cleanedItems = applicationItems(parsed)
+    .filter((item) => !item._locked || baselineItems.some((baseline) => sameApplicationItem(baseline, item)))
+    .map(editableApplicationItem);
+  const next = JSON.parse(JSON.stringify(parsed));
+  next.commissionData = next.commissionData || {};
+  next.commissionData.testItems = cleanedItems.filter((item) => !item.cancelled_in_additional_test && !item.restored_in_additional_test);
+  next.templateData = next.templateData || {};
+  next.templateData.testItems = cleanedItems;
+  next.formSnapshot = next.formSnapshot || {};
+  next.formSnapshot.businessTestItems = cleanedItems;
+  next.formSnapshot.formData = {
+    ...(next.formSnapshot.formData || {}),
+    testItems: cleanedItems
+  };
+  return next;
 }
 
 function applicationItemKey(item = {}) {
@@ -135,17 +227,22 @@ function isCurrentlyCancelled(item = {}) {
 }
 
 function sameApplicationItem(left = {}, right = {}) {
+  const leftKey = applicationItemKey(left);
+  const rightKey = applicationItemKey(right);
+  const hasBusinessIdentity = (item) => [
+    item.sampleName ?? item.sample_name, item.material, item.original_no ?? item.originalNo,
+    item.test_item, item.test_method ?? item.testMethod, item.quantity
+  ].some((value) => String(value ?? '').trim() !== '');
+  if (hasBusinessIdentity(left) && hasBusinessIdentity(right)) return leftKey === rightKey;
   const leftId = left.test_item_id ?? left.testItemId;
   const rightId = right.test_item_id ?? right.testItemId;
-  if (leftId != null && rightId != null && String(leftId) === String(rightId)) return true;
-  return applicationItemKey(left) === applicationItemKey(right);
+  return leftId != null && rightId != null && String(leftId) === String(rightId);
 }
 
-function withoutCancelledItems(items = [], cancellationStates = items) {
-  return items.filter((item) => {
-    const state = cancellationStates.find((candidate) => sameApplicationItem(item, candidate));
-    return !state || !isCurrentlyCancelled(state);
-  });
+function withoutCancelledItems(items = []) {
+  // The flow document follows the formal LIMS order exclusively. Business
+  // snapshots can have split/merged names and must not decide this export.
+  return items.filter((item) => String(item.status || '').trim().toLowerCase() !== 'cancelled');
 }
 
 function cumulativeAdditionalItemStates(rows = []) {
@@ -173,24 +270,52 @@ function cumulativeAdditionalItemStates(rows = []) {
   return states;
 }
 
-function cumulativeApplicationItems(rows = []) {
-  const orderedRows = [...rows].sort((a, b) => Number(b.request_id) - Number(a.request_id));
-  const baselineRow = orderedRows.find((row) => row.request_type !== 'additional_test' && applicationPrefillPayload(row));
-  const items = applicationItems(applicationPrefillPayload(baselineRow) || {}).map(editableApplicationItem);
-  const additions = orderedRows
-    .filter((row) => row.request_type === 'additional_test' && row.status === 'approved' && row.applied_at)
-    .sort((a, b) => Number(a.request_id) - Number(b.request_id));
-  additions.forEach((row) => {
-    applicationItems(applicationPrefillPayload(row) || {}).forEach((addition) => {
+function cumulativeApplicationItemsWithStates(rows = []) {
+  const orderedRows = [...rows].sort((a, b) => Number(a.request_id) - Number(b.request_id));
+  let items = [];
+  orderedRows.forEach((row) => {
+    const payload = applicationPrefillPayload(row);
+    if (!payload || row.status === 'withdrawn') return;
+    if (row.request_type === 'normal') {
+      if (!items.length) items = applicationItems(payload).map(editableApplicationItem);
+      return;
+    }
+    if (row.request_type === 'modification') {
+      const cleanedPayload = withBusinessModificationItems(payload, items);
+      const modifiedItems = applicationItems(cleanedPayload).map(editableApplicationItem);
+      if (modifiedItems.length) items = modifiedItems;
+      return;
+    }
+    if (row.request_type !== 'additional_test' || row.status !== 'approved' || !row.applied_at) return;
+    applicationItems(payload).forEach((addition) => {
       const existingIndex = items.findIndex((item) => sameApplicationItem(item, addition));
       if (addition.cancelled_in_additional_test || addition.cancelled) {
-        if (existingIndex >= 0) items.splice(existingIndex, 1);
+        // 只允许取消业务申请链中确实存在的项目。历史版本曾把 LIMS 正式项目
+        // 混入加测快照；这些无法匹配业务项目的取消行必须忽略，不能反向污染业务视图。
+        if (existingIndex >= 0) {
+          items[existingIndex] = {
+            ...items[existingIndex],
+            ...editableApplicationItem(addition),
+            cancelled_in_additional_test: true,
+            restored_in_additional_test: false
+          };
+        }
       } else if (isCancellationRestore(addition)) {
-        if (existingIndex < 0) items.push(editableApplicationItem(addition));
+        const restored = {
+          ...editableApplicationItem(addition),
+          cancelled_in_additional_test: false,
+          restored_in_additional_test: true
+        };
+        if (existingIndex >= 0) items[existingIndex] = { ...items[existingIndex], ...restored };
+        else items.push(restored);
       } else if (existingIndex < 0) items.push(editableApplicationItem(addition));
     });
   });
   return items;
+}
+
+function cumulativeApplicationItems(rows = []) {
+  return cumulativeApplicationItemsWithStates(rows).filter((item) => !isCurrentlyCancelled(item));
 }
 
 function requestNumber(id) {
@@ -217,6 +342,12 @@ function requestArrivalSummary(payload) {
   return { arrival_mode: arrivalMode, test_item_count: testItems.length };
 }
 
+function requestMonthPreference(requestType, payload) {
+  if ((requestType || 'normal') !== 'normal') return '-';
+  const packet = parseJson(payload) || {};
+  return packet?.formSnapshot?.orderMonthPreference?.choice === 'next' ? 'next' : 'current';
+}
+
 function validateBusinessTestItemArrival(testItems) {
   if (!Array.isArray(testItems)) return '申请内容格式不正确';
   for (let index = 0; index < testItems.length; index += 1) {
@@ -234,22 +365,6 @@ function validateBusinessTestItemArrival(testItems) {
 function safeFilePart(value, fallback = '未填写') {
   const text = String(value || fallback).trim();
   return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || fallback;
-}
-
-function compactFilenameDate(value) {
-  const digits = String(value || '').replace(/\D/g, '').slice(0, 8);
-  return digits.length === 8 ? digits : String(formatLocalDate()).replace(/\D/g, '').slice(0, 8);
-}
-
-function appendOrderDateToPdfFilename(filename, orderDate) {
-  const safeName = path.basename(String(filename || '委托单.pdf'));
-  const extension = path.extname(safeName) || '.pdf';
-  const stem = path.basename(safeName, path.extname(safeName));
-  const date = compactFilenameDate(orderDate);
-  if (new RegExp(`(?:^|-)${date}(?:-|$)`).test(stem)) return `${stem}${extension}`;
-  const addOnSuffix = stem.endsWith('-加测') ? '-加测' : '';
-  const baseStem = addOnSuffix ? stem.slice(0, -addOnSuffix.length) : stem;
-  return `${baseStem}-${date}${addOnSuffix}${extension}`;
 }
 
 function removeOrderDateFromPdfFilename(filename) {
@@ -540,6 +655,7 @@ router.get('/', async (req, res, next) => {
     const allowedRequestTypes = new Set(['normal', 'additional_test', 'modification']);
     const requestedStatus = String(req.query.status || '').trim();
     const requestedType = String(req.query.request_type || '').trim();
+    const requestedMonth = String(req.query.order_month || '').trim();
     const keyword = String(req.query.keyword || '').trim().slice(0, 100);
     const reservedOrderSql = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.workflow.reservedOrderId')), 'null')`;
     const displayOrderSql = `COALESCE(r.approved_order_id, r.target_order_id, ${reservedOrderSql})`;
@@ -549,6 +665,9 @@ router.get('/', async (req, res, next) => {
     }
     if (requestedType && !allowedRequestTypes.has(requestedType)) {
       return res.status(400).json({ message: '申请类型筛选值不正确' });
+    }
+    if (requestedMonth && !/^\d{4}$/.test(requestedMonth)) {
+      return res.status(400).json({ message: '开单月份筛选值不正确' });
     }
 
     const baseConditions = [];
@@ -566,6 +685,10 @@ router.get('/', async (req, res, next) => {
     if (requestedType) {
       baseConditions.push('r.request_type = ?');
       baseParams.push(requestedType);
+    }
+    if (requestedMonth) {
+      baseConditions.push(`SUBSTRING(${displayOrderSql}, 3, 4) = ?`);
+      baseParams.push(requestedMonth);
     }
     if (keyword) {
       const fuzzyKeyword = `%${keyword}%`;
@@ -761,6 +884,7 @@ router.get('/', async (req, res, next) => {
       return {
         ...listRow,
         ...requestArrivalSummary(submittedPayload),
+        order_month_preference: requestMonthPreference(row.request_type, submittedPayload),
         request_no: requestNumber(row.request_id)
       };
     }));
@@ -789,6 +913,91 @@ router.get('/', async (req, res, next) => {
       },
       counts
     });
+  } catch (error) { next(error); }
+});
+
+router.get('/review-months', requireReviewer, async (_req, res, next) => {
+  try {
+    const reservedOrderSql = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.workflow.reservedOrderId')), 'null')`;
+    const displayOrderSql = `COALESCE(r.approved_order_id, r.target_order_id, ${reservedOrderSql})`;
+    const [rows] = await pool.query(
+      `SELECT DISTINCT SUBSTRING(${displayOrderSql}, 3, 4) AS order_month
+       FROM order_requests r
+       WHERE r.status <> 'draft' AND ${displayOrderSql} REGEXP '^JC[0-9]{4}'
+       ORDER BY order_month DESC`
+    );
+    res.json(rows
+      .map((row) => String(row.order_month || ''))
+      .filter((value) => /^\d{4}$/.test(value) && Number(value.slice(2)) >= 1 && Number(value.slice(2)) <= 12)
+      .map((value) => ({ value, label: `20${value.slice(0, 2)}年${value.slice(2)}月` })));
+  } catch (error) { next(error); }
+});
+
+router.get('/rejection-export', requireReviewer, async (req, res, next) => {
+  try {
+    const allowedStatuses = new Set(['submitted', 'pending_open', 'opened', 'returned', 'withdrawn']);
+    const allowedRequestTypes = new Set(['normal', 'additional_test', 'modification']);
+    const requestedStatus = String(req.query.status || '').trim();
+    const requestedType = String(req.query.request_type || '').trim();
+    const requestedMonth = String(req.query.order_month || '').trim();
+    const keyword = String(req.query.keyword || '').trim().slice(0, 100);
+    if (requestedStatus && !allowedStatuses.has(requestedStatus)) return res.status(400).json({ message: '申请状态筛选值不正确' });
+    if (requestedType && !allowedRequestTypes.has(requestedType)) return res.status(400).json({ message: '申请类型筛选值不正确' });
+    if (requestedMonth && !/^\d{4}$/.test(requestedMonth)) return res.status(400).json({ message: '开单月份筛选值不正确' });
+
+    const reservedOrderSql = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.workflow.reservedOrderId')), 'null')`;
+    const displayOrderSql = `COALESCE(r.approved_order_id, r.target_order_id, ${reservedOrderSql})`;
+    const displayStatusSql = workflowStatusSql('r');
+    const urgencySql = `COALESCE(
+      CASE WHEN JSON_VALID(r.reviewed_payload) THEN JSON_UNQUOTE(JSON_EXTRACT(r.reviewed_payload, '$.formSnapshot.formData.orderUrgencyType')) END,
+      CASE WHEN JSON_VALID(r.submitted_payload) THEN JSON_UNQUOTE(JSON_EXTRACT(r.submitted_payload, '$.formSnapshot.formData.orderUrgencyType')) END,
+      'normal'
+    )`;
+    const conditions = ["r.status <> 'draft'"];
+    const params = [];
+    if (requestedStatus) {
+      conditions.push(`${displayStatusSql} = ?`);
+      params.push(requestedStatus);
+    }
+    if (requestedType) {
+      conditions.push('r.request_type = ?');
+      params.push(requestedType);
+    }
+    if (requestedMonth) {
+      conditions.push(`SUBSTRING(${displayOrderSql}, 3, 4) = ?`);
+      params.push(requestedMonth);
+    }
+    if (keyword) {
+      const fuzzyKeyword = `%${keyword}%`;
+      conditions.push(`(
+        CONCAT('SQ', LPAD(r.request_id, 8, '0')) LIKE ? OR COALESCE(${displayOrderSql}, '') LIKE ?
+        OR EXISTS (SELECT 1 FROM commissioners search_commissioner WHERE search_commissioner.commissioner_id = r.commissioner_id AND search_commissioner.commissioner_name LIKE ?)
+        OR EXISTS (SELECT 1 FROM customers search_customer WHERE search_customer.customer_id = r.customer_id AND search_customer.customer_name LIKE ?)
+        OR EXISTS (SELECT 1 FROM commissioners search_contact WHERE search_contact.commissioner_id = r.commissioner_id AND search_contact.contact_name LIKE ?)
+        OR EXISTS (SELECT 1 FROM payers search_payer JOIN users search_salesperson ON search_salesperson.user_id = search_payer.owner_user_id WHERE search_payer.payer_id = r.payer_id AND search_salesperson.name LIKE ?)
+      )`);
+      params.push(fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword, fuzzyKeyword);
+    }
+    const [rows] = await pool.query(
+      `SELECT DATE_FORMAT(o.created_at, '%Y-%m-%d') AS opened_date,
+              DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
+              ${displayOrderSql} AS order_id, r.request_type, applicant.name AS applicant_name,
+              salesperson.name AS salesperson_name,
+              CASE WHEN ${displayStatusSql} = 'returned' THEN r.review_note ELSE '' END AS review_note
+       FROM order_requests r
+       JOIN users applicant ON applicant.user_id = r.applicant_user_id
+       LEFT JOIN payers payer ON payer.payer_id = r.payer_id
+       LEFT JOIN users salesperson ON salesperson.user_id = payer.owner_user_id
+       LEFT JOIN orders o ON o.order_id = ${displayOrderSql}
+       WHERE ${conditions.join(' AND ')}
+       ${reviewerOrderBySql(displayOrderSql, urgencySql)}`,
+      params
+    );
+    const workbook = buildRejectionSummaryWorkbook(rows);
+    const filename = `驳回汇总-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(workbook);
   } catch (error) { next(error); }
 });
 
@@ -865,6 +1074,11 @@ router.post('/', requireSales, async (req, res, next) => {
     await conn.query('UPDATE order_requests SET root_request_id = request_id WHERE request_id = ?', [result.insertId]);
     const requestNo = requestNumber(result.insertId);
     await addEvent(conn, result.insertId, req.user.user_id, 'submitted');
+    await createNotification(conn, submittedNotification({
+      requestId: result.insertId,
+      requestType: 'normal',
+      actorName: req.user.name
+    }), req.user.user_id);
     await conn.commit();
     res.status(201).json({
       request_id: result.insertId,
@@ -1020,8 +1234,7 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
     requestPayload.templateData = { ...(requestPayload.templateData || {}), order_num: targetOrderId };
     await preserveOriginalApplicationSignatureDates(conn, requestPayload, targetOrderId);
     if (requestType === 'modification') {
-      // 提交时保存 LIMS 修改前的正式项目，预览据此逐字段标记；父申请的业务快照
-      // 与正式项目可能天然不同，不能作为修改基线。
+      // 业务基线仅使用申请版本链；正式项目在开单员审批时独立读取。
       await setModificationBaselineTestItems(conn, requestPayload, targetOrderId);
     }
     const [result] = await conn.query(
@@ -1036,6 +1249,11 @@ router.post('/:id/follow-up', requireSales, async (req, res, next) => {
       ]
     );
     await addEvent(conn, result.insertId, req.user.user_id, 'submitted', requestType === 'modification' ? '修改申请' : '加测申请');
+    await createNotification(conn, submittedNotification({
+      requestId: result.insertId,
+      requestType,
+      actorName: req.user.name
+    }), req.user.user_id);
     await conn.commit();
     res.status(201).json({ request_id: result.insertId, request_no: requestNumber(result.insertId), request_type: requestType, status: 'submitted', approved_order_id: targetOrderId });
   } catch (error) {
@@ -1122,6 +1340,12 @@ router.put('/:id', requireSales, async (req, res, next) => {
       'submitted',
       row.status === 'draft' ? '草稿正式提交' : '业务修改申请'
     );
+    await createNotification(conn, submittedNotification({
+      requestId: row.request_id,
+      requestType: row.request_type,
+      actorName: req.user.name,
+      resubmitted: row.status !== 'draft'
+    }), req.user.user_id);
     await conn.commit();
     res.json({ ok: true, status: 'submitted', version: expectedVersion + 1 });
   } catch (error) {
@@ -1369,7 +1593,7 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     const baseReviewedPayload = parseJson(baseRequest.reviewed_payload);
     const baseSubmittedPayload = parseJson(baseRequest.submitted_payload);
     const [[latestModification]] = await conn.query(
-      `SELECT reviewed_payload, submitted_payload, reviewed_at
+      `SELECT request_id, reviewed_payload, submitted_payload, reviewed_at
        FROM order_requests
        WHERE target_order_id = ? AND request_type = 'modification' AND status = 'approved'
        ORDER BY reviewed_at DESC, request_id DESC LIMIT 1`,
@@ -1387,7 +1611,24 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       additionalTests,
       latestModification?.reviewed_at
     );
-    const modificationPayload = parseJson(latestModification?.reviewed_payload) || parseJson(latestModification?.submitted_payload);
+    let modificationPayload = parseJson(latestModification?.submitted_payload) || parseJson(latestModification?.reviewed_payload);
+    if (latestModification?.request_id && modificationPayload) {
+      const [priorBusinessRows] = await conn.query(
+        `SELECT request_id, request_type, status, applied_at, submitted_payload, reviewed_payload
+         FROM order_requests
+         WHERE request_id < ? AND (approved_order_id = ? OR target_order_id = ?)
+         ORDER BY request_id`,
+        [latestModification.request_id, orderIdValue, orderIdValue]
+      );
+      modificationPayload = withBusinessModificationItems(
+        modificationPayload,
+        cumulativeApplicationItemsWithStates(priorBusinessRows)
+      );
+    }
+    if (modificationPayload) {
+      // 历史申请再次编辑时可能丢失 workflow.requestType，以数据库申请类型为准。
+      modificationPayload.workflow = { ...modificationPayload.workflow, requestType: 'modification' };
+    }
     const payload = modificationPayload || baseReviewedPayload || baseSubmittedPayload || {};
     const salesperson = await syncRequestSalesperson(conn, payload);
     if (!salesperson) return res.status(409).json({ message: '当前付款方未绑定有效的服务方联系人，无法生成带电子签名的 PDF' });
@@ -1398,7 +1639,9 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
       modificationPayload || baseReviewedPayload,
       baseSubmittedPayload,
       orderIdValue,
-      additionalTestsForPdf.map((item) => parseJson(item.reviewed_payload) || parseJson(item.submitted_payload) || {}),
+      // 加测 PDF 只认业务提交快照；开单员正式录入内容已经写入 LIMS，
+      // 不得再从 reviewed_payload 反向进入开单系统 PDF。
+      additionalSubmittedPayloadsForPdf(additionalTestsForPdf),
       baseRequest.application_date
     );
     if (!templateData) return res.status(400).json({ message: '申请中缺少委托单模板数据' });
@@ -1460,8 +1703,7 @@ router.post('/:id/generate-pdf', async (req, res, next) => {
     const hasAdditionalTest = additionalTests.length > 0;
     const customerName = safeFilePart(baseSubmittedPayload?.formSnapshot?.selectedCustomer?.customer_name, '委托方');
     const contactName = safeFilePart(baseSubmittedPayload?.formSnapshot?.selectedCustomer?.contact_name, '联系人');
-    const orderDate = compactFilenameDate(row.order_date || baseRequest.application_date);
-    const stableBaseName = `${orderId}-${customerName}-${contactName}-${orderDate}`;
+    const stableBaseName = `${orderId}-${customerName}-${contactName}`;
     const baseName = `${stableBaseName}${hasAdditionalTest ? '-加测' : ''}`;
     const relativeDir = path.join('order-requests', orderId);
     const absoluteDir = path.join(__dirname, '..', '..', 'uploads', relativeDir);
@@ -1639,19 +1881,10 @@ router.get('/:id/flow-document', async (req, res, next) => {
       || parseJson(row.submitted_payload)
       || {};
     const items = await getOrderTestItemsForFlow(pool, orderId);
-    const [additionalRequests] = await pool.query(
-      `SELECT request_id, request_type, status, applied_at, submitted_payload, reviewed_payload
-       FROM order_requests
-       WHERE target_order_id = ? AND request_type = 'additional_test'
-         AND status = 'approved' AND applied_at IS NOT NULL
-       ORDER BY request_id`,
-      [orderId]
-    );
-    const cancellationStates = cumulativeAdditionalItemStates(additionalRequests);
     const flowData = buildProcessTemplateData(
       packet,
       orderId,
-      withoutCancelledItems(items, cancellationStates)
+      withoutCancelledItems(items)
     );
     const buffer = await generateProcessTemplateBuffer(flowData);
     const filename = buildFlowDocumentFilename(orderId);
@@ -1670,7 +1903,7 @@ router.get('/:id/test-items-document', requireReviewer, async (req, res, next) =
     );
     if (!row) return res.status(404).json({ message: '申请不存在' });
     if (!await canAccessRequest(row, req.user)) return res.status(403).json({ message: '无权导出该申请的检测项目' });
-    const packet = parseJson(row.reviewed_payload) || parseJson(row.submitted_payload) || {};
+    const packet = parseJson(row.submitted_payload) || parseJson(row.reviewed_payload) || {};
     const snapshot = packet.formSnapshot || {};
     const snapshotItems = Array.isArray(snapshot.businessTestItems)
       ? snapshot.businessTestItems
@@ -1719,9 +1952,7 @@ router.get('/:id/attachment', async (req, res, next) => {
     if (!filePath) return res.status(404).json({ message: '附件文件不存在' });
     res.type(row.mime_type || 'application/pdf');
     const downloadFilename = row.mime_type === 'application/pdf'
-      ? (isReviewer(req.user)
-        ? removeOrderDateFromPdfFilename(row.original_filename)
-        : appendOrderDateToPdfFilename(row.original_filename, row.order_date))
+      ? removeOrderDateFromPdfFilename(row.original_filename)
       : row.original_filename;
     res.download(filePath, downloadFilename);
   } catch (error) {
@@ -1757,6 +1988,24 @@ router.get('/:id', async (req, res, next) => {
       [row.request_id, row.root_request_id, row.request_id, relatedOrderId || null, relatedOrderId || null, relatedOrderId || null]
     );
     row.related_request_ids = relatedRows.map((item) => item.request_id);
+    row.cumulative_business_items = cumulativeApplicationItems([
+      ...relatedRows,
+      row
+    ]);
+    row.business_follow_up_items = cumulativeApplicationItemsWithStates([
+      ...relatedRows,
+      row
+    ]);
+    row.business_baseline_items = cumulativeApplicationItemsWithStates(
+      relatedRows.filter((item) => Number(item.request_id) < Number(row.request_id))
+    );
+    if (row.request_type === 'modification') {
+      const prior = relatedRows.filter(item => Number(item.request_id) < Number(row.request_id)
+        && item.status === 'approved' && (item.request_type !== 'additional_test' || item.applied_at))
+        .sort((a,b) => Number(b.request_id) - Number(a.request_id))[0];
+      row.business_baseline_payload = applicationPrefillPayload(prior || {}) || null;
+      row.business_baseline_form = row.business_baseline_payload?.formSnapshot?.formData || null;
+    }
     row.additional_item_states = cumulativeAdditionalItemStates([
       ...relatedRows,
       row
@@ -1772,8 +2021,20 @@ router.get('/:id', async (req, res, next) => {
         row.original_sales_signature_date = originalSignatureMetadata.salesDate;
       }
     }
-    row.submitted_payload = parseJson(row.submitted_payload);
-    row.reviewed_payload = parseJson(row.reviewed_payload);
+    row.submitted_payload = row.request_type === 'additional_test'
+      ? withoutLeakedFormalAdditionalItems(row.submitted_payload, row.business_baseline_items)
+      : row.request_type === 'modification'
+        ? withBusinessModificationBaseline(
+            withBusinessModificationItems(row.submitted_payload, row.business_baseline_items),
+            row.business_baseline_items
+          )
+        : parseJson(row.submitted_payload);
+    row.reviewed_payload = ['normal', 'additional_test', 'modification'].includes(row.request_type)
+      ? withoutFormalItems(row.reviewed_payload, row.submitted_payload)
+      : parseJson(row.reviewed_payload);
+    if (row.request_type === 'modification') {
+      row.reviewed_payload = withBusinessModificationBaseline(row.reviewed_payload, row.business_baseline_items);
+    }
     row.reserved_order_id = extractReservedOrderId(row.reviewed_payload) || null;
     row.display_order_id = row.approved_order_id || row.target_order_id || row.reserved_order_id || null;
     row.order_opened = row.request_type === 'normal'
@@ -1782,6 +2043,9 @@ router.get('/:id', async (req, res, next) => {
         ? row.status === 'approved'
         : Boolean(row.applied_at);
     row.display_status = row.status === 'approved' ? (row.order_opened ? 'opened' : 'pending_open') : row.status;
+    if (isReviewer(req.user) && row.request_type === 'modification' && row.status === 'submitted') {
+      row.formal_test_items = await getOrderTestItemsForFlow(pool, relatedOrderId);
+    }
     row.request_no = requestNumber(row.request_id);
     res.json(row);
   } catch (error) { next(error); }
@@ -1792,7 +2056,7 @@ router.post('/:id/withdraw', requireSales, async (req, res, next) => {
   try {
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, applicant_user_id, status FROM order_requests WHERE request_id = ? FOR UPDATE`,
+      `SELECT request_id, applicant_user_id, status, request_type FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
     if (!row) throw Object.assign(new Error('申请不存在'), { status: 404 });
@@ -1806,6 +2070,11 @@ router.post('/:id/withdraw', requireSales, async (req, res, next) => {
       [row.request_id]
     );
     await addEvent(conn, row.request_id, req.user.user_id, 'withdrawn');
+    await createNotification(conn, withdrawnNotification({
+      requestId: row.request_id,
+      requestType: row.request_type,
+      actorName: req.user.name
+    }), req.user.user_id);
     await conn.commit();
     res.json({ ok: true, status: 'withdrawn' });
   } catch (error) {
@@ -1819,10 +2088,10 @@ router.post('/:id/return', requireReviewer, async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
     const note = String(req.body?.note || '').trim();
-    if (!note) return res.status(400).json({ message: '请填写退回原因' });
+    if (!note) return res.status(400).json({ message: '请填写驳回原因' });
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, status FROM order_requests WHERE request_id = ? FOR UPDATE`,
+      `SELECT request_id, applicant_user_id, status FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
     if (!row) throw Object.assign(new Error('申请不存在'), { status: 404 });
@@ -1834,6 +2103,12 @@ router.post('/:id/return', requireReviewer, async (req, res, next) => {
       [req.user.user_id, note, row.request_id]
     );
     await addEvent(conn, row.request_id, req.user.user_id, 'returned', note);
+    await createNotification(conn, applicantNotification({
+      applicantUserId: row.applicant_user_id,
+      requestId: row.request_id,
+      eventType: 'returned',
+      note
+    }), req.user.user_id);
     await conn.commit();
     res.json({ ok: true, status: 'returned' });
   } catch (error) {
@@ -1854,7 +2129,7 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
     }
 
     const [[candidate]] = await conn.query(
-      `SELECT request_id, status, request_type, target_order_id, version, submitted_at, submitted_payload
+      `SELECT request_id, applicant_user_id, status, request_type, target_order_id, version, submitted_at, submitted_payload
        FROM order_requests WHERE request_id = ?`,
       [req.params.id]
     );
@@ -1863,7 +2138,7 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
     if (candidate.request_type !== 'normal') {
       await conn.beginTransaction();
       const [[followUp]] = await conn.query(
-        `SELECT request_id, status, request_type, target_order_id, version, submitted_at, submitted_payload
+        `SELECT request_id, applicant_user_id, status, request_type, target_order_id, version, submitted_at, submitted_payload
          FROM order_requests WHERE request_id = ? FOR UPDATE`,
         [req.params.id]
       );
@@ -1879,14 +2154,34 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
         throw Object.assign(new Error('该委托单存在更早的修改或加测申请尚未完成，请按版本顺序处理'), { status: 409 });
       }
       await assertFollowUpBaselineCurrent(conn, followUp);
-      const payload = parseJson(followUp.submitted_payload) || {};
+      let payload = parseJson(followUp.submitted_payload) || {};
       if (followUp.request_type === 'modification') {
-        await applyOrderModification(conn, followUp.target_order_id, payload);
+        const [priorBusinessRows] = await conn.query(
+          `SELECT request_id, request_type, status, applied_at, submitted_payload, reviewed_payload
+           FROM order_requests
+           WHERE request_id < ? AND (approved_order_id = ? OR target_order_id = ?)
+           ORDER BY request_id`,
+          [followUp.request_id, followUp.target_order_id, followUp.target_order_id]
+        );
+        payload = withBusinessModificationItems(
+          payload,
+          cumulativeApplicationItemsWithStates(priorBusinessRows)
+        );
+        const formalItems = await validateFormalModificationReview(conn, followUp.target_order_id, req.body?.formalReview);
+        await applyOrderModification(conn, followUp.target_order_id, {
+          ...payload,
+          workflow: {
+            ...(payload.workflow || {}),
+            deletedFormalTestItemIds: formalItems.deleted_ids || [],
+            operatorUserId: req.user.user_id
+          },
+          commissionData: { ...payload.commissionData, testItems: formalItems }
+        });
         await linkRequestFilesToLims(conn, followUp.request_id, followUp.target_order_id);
       }
       const reviewedPayload = {
         ...payload,
-        workflow: { ...(payload.workflow || {}), approvedAt: new Date().toISOString(), targetOrderId: followUp.target_order_id }
+        workflow: { ...(payload.workflow || {}), requestType: followUp.request_type, approvedAt: new Date().toISOString(), targetOrderId: followUp.target_order_id }
       };
       if (followUp.request_type === 'additional_test') {
         reviewedPayload.formSnapshot = reviewedPayload.formSnapshot || {};
@@ -1908,6 +2203,12 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
         ]
       );
       await addEvent(conn, followUp.request_id, req.user.user_id, 'approved', followUp.target_order_id);
+      await createNotification(conn, applicantNotification({
+        applicantUserId: followUp.applicant_user_id,
+        requestId: followUp.request_id,
+        eventType: 'approved',
+        orderNum: followUp.target_order_id
+      }), req.user.user_id);
       await conn.commit();
       return res.json({ ok: true, status: 'approved', orderNum: followUp.target_order_id, requestType: followUp.request_type, requiresOpen: followUp.request_type === 'additional_test', version: expectedVersion + 1 });
     }
@@ -1919,7 +2220,7 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
 
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, status, approved_order_id, version, submitted_at, submitted_payload
+      `SELECT request_id, applicant_user_id, status, approved_order_id, version, submitted_at, submitted_payload
        FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
@@ -1961,6 +2262,12 @@ router.post('/:id/approve', requireReviewer, async (req, res, next) => {
       ]
     );
     await addEvent(conn, row.request_id, req.user.user_id, 'approved', reservedOrderId);
+    await createNotification(conn, applicantNotification({
+      applicantUserId: row.applicant_user_id,
+      requestId: row.request_id,
+      eventType: 'approved',
+      orderNum: reservedOrderId
+    }), req.user.user_id);
     await conn.commit();
     res.json({ ok: true, status: 'approved', orderNum: reservedOrderId, version: expectedVersion + 1 });
   } catch (error) {
@@ -1988,8 +2295,8 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
 
     await conn.beginTransaction();
     const [[row]] = await conn.query(
-      `SELECT request_id, status, request_type, target_order_id, approved_order_id, applied_at,
-              submitted_at, reviewed_payload, version
+      `SELECT request_id, applicant_user_id, status, request_type, target_order_id, approved_order_id, applied_at,
+              submitted_at, submitted_payload, reviewed_payload, version
        FROM order_requests WHERE request_id = ? FOR UPDATE`,
       [req.params.id]
     );
@@ -2050,7 +2357,18 @@ router.post('/:id/open', requireReviewer, async (req, res, next) => {
         [JSON.stringify(reviewedPayload), result.orderNum, row.request_id]
       );
     }
+    const orderingReviewedPayload = withoutFormalItems(reviewedPayload, row.submitted_payload);
+    await conn.query(
+      `UPDATE order_requests SET reviewed_payload = ? WHERE request_id = ?`,
+      [JSON.stringify(orderingReviewedPayload), row.request_id]
+    );
     await addEvent(conn, row.request_id, req.user.user_id, 'opened', result.orderNum);
+    await createNotification(conn, applicantNotification({
+      applicantUserId: row.applicant_user_id,
+      requestId: row.request_id,
+      eventType: 'opened',
+      orderNum: result.orderNum
+    }), req.user.user_id);
     await conn.commit();
     res.json({ ok: true, status: 'approved', orderNum: result.orderNum, flowTestItems, version: expectedVersion + 1 });
   } catch (error) {
@@ -2064,17 +2382,23 @@ module.exports = {
   router,
   buildFlowDocumentFilename,
   buildRequirementDownloadFilename,
-  appendOrderDateToPdfFilename,
   removeOrderDateFromPdfFilename,
   reviewerOrderBySql,
   canAccessRequest,
   requestArrivalSummary,
+  requestMonthPreference,
   validateBusinessTestItemArrival,
   applicationPrefillPayload,
+  additionalSubmittedPayloadsForPdf,
   cumulativeApplicationItems,
+  cumulativeApplicationItemsWithStates,
   cumulativeAdditionalItemStates,
   withoutCancelledItems,
   followUpBlocksNewVersion,
+  withoutFormalItems,
+  withoutLeakedFormalAdditionalItems,
+  withBusinessModificationItems,
+  setModificationBaselineTestItems,
   insertProjectFileLinks,
   linkExistingRequirementsToAddedTests
 };

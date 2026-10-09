@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow, modificationItemUpdates } = require('./orderFollowUp');
+const { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow, modificationItemUpdates, validateFormalModificationReview } = require('./orderFollowUp');
 
 test('修改申请更新项目字段，但不更改检测项目名称', async () => {
   const calls = [];
@@ -76,6 +76,17 @@ test('修改申请只改数量时不会覆盖备注和其他未修改字段', as
   assert.doesNotMatch(orderUpdate.sql, /note|requires_flow|flow_note|total_price|delivery_days_after_receipt|subcontracting_not_accepted/);
   assert.equal(calls.some(call => /INSERT INTO\s+reports/i.test(call.sql)), false);
   assert.equal(calls.some(call => /UPDATE\s+sample_(handling|requirements)/i.test(call.sql)), false);
+});
+
+test('旧版业务行号绑定不能再写回 LIMS', async () => {
+  const conn = { async query(sql) {
+    if (sql.includes('SELECT order_id FROM orders')) return [[{order_id:'O1'}]];
+    return [{affectedRows:1}];
+  }};
+  await assert.rejects(applyOrderModification(conn, 'O1', {
+    workflow: {modifiedFields: [], formalTestItemBindings:[88]},
+    commissionData: {testItems:[{quantity:6, modified_fields:['quantity']}]}
+  }), /缺少正式项目标识/);
 });
 
 test('旧版修改请求中的空字符串不会清空正式项目字段', () => {
@@ -198,10 +209,33 @@ test('加测录入只追加 is_add_on=1 的新检测项目且不再写项目级�
   assert.ok(insert);
   assert.match(insert.sql, /is_add_on/);
   assert.match(insert.sql, /business_note/);
-  assert.match(insert.sql, /NULL, NULL, 1,/);
+  assert.match(insert.sql, /NULL, NULL, \?,/);
+  assert.equal((insert.sql.match(/\?/g) || []).length, insert.params.length);
+  assert.equal(insert.params[11], 1);
   assert.equal(insert.params[0], 'JC26080001');
   assert.equal(insert.params[8], 3);
   assert.equal(insert.params[19], null);
+});
+
+test('纯取消型加测允许不新增 LIMS 检测项目', async () => {
+  const calls = [];
+  const conn = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT payer_id FROM orders')) return [[{ payer_id: null }], []];
+      return [[], []];
+    }
+  };
+
+  const ids = await appendOrderTestItems(conn, 'JC26080001', {
+    commissionData: { testItems: [] },
+    formSnapshot: {
+      businessTestItems: [{ test_item_id: 101, cancelled_in_additional_test: true }]
+    }
+  }, 'JC0089');
+
+  assert.deepEqual(ids, []);
+  assert.equal(calls.some((call) => call.sql.includes('INSERT INTO test_items')), false);
 });
 
 test('加测项目把原委托单服务方写入当前负责人和指派来源', async () => {
@@ -279,5 +313,97 @@ test('流转单读取正式单号下全部原项目和加测项目', async () =>
   assert.deepEqual(items, expected);
   assert.deepEqual(calls[0].params, ['JC26080001']);
   assert.match(calls[0].sql, /WHERE ti\.order_id = \?/);
+  assert.match(calls[0].sql, /ti\.status/);
   assert.doesNotMatch(calls[0].sql, /is_add_on\s*=\s*1/);
+});
+
+const formalBaseline = [{test_item_id:88, sample_name:'正式样品', test_item:'合并项目', quantity:2, note:'LIMS备注', arrival_mode:'delivery', sample_arrival_status:'arrived'}];
+const formalConnection = { async query(sql) { assert.match(sql, /FOR UPDATE/); return [structuredClone(formalBaseline)]; } };
+
+test('审批缺少独立正式录入时拒绝通过，不使用业务快照兜底', async () => {
+  await assert.rejects(validateFormalModificationReview(formalConnection,'O1',undefined), /进入修改审批表单/);
+});
+test('业务五项与正式一项独立：仅按正式 ID 修改且保留未编辑字段', async () => {
+  const items=await validateFormalModificationReview(formalConnection,'O1',{
+    baseline:formalBaseline, items:[{test_item_id:88,quantity:9}]
+  });
+  assert.equal(items.length,1);
+  assert.deepEqual(items[0].modified_fields,['quantity']);
+  assert.equal(items[0].note,'LIMS备注');
+  assert.equal(items[0].test_item,'合并项目');
+});
+test('LIMS 内容在审批期间改变时拒绝覆盖', async () => {
+  await assert.rejects(validateFormalModificationReview(formalConnection,'O1',{
+    baseline:[{...formalBaseline[0],quantity:1}],items:formalBaseline
+  }), /已变化/);
+});
+test('正式项目 ID 冒用和重复时拒绝，删除项目会生成删除清单', async () => {
+  for (const items of [[{...formalBaseline[0],test_item_id:99}], [...formalBaseline,...formalBaseline]]) {
+    await assert.rejects(validateFormalModificationReview(formalConnection,'O1',{baseline:formalBaseline,items}), /标识无效/);
+  }
+  const deleted = await validateFormalModificationReview(formalConnection,'O1',{baseline:formalBaseline,items:[]});
+  assert.deepEqual(deleted.deleted_ids, [88]);
+});
+
+test('修改审批允许复制或添加正式项目，并把它标记为新增记录', async () => {
+  const added = await validateFormalModificationReview(formalConnection, 'O1', {
+    baseline: formalBaseline,
+    items: [...formalBaseline, {
+      sample_name: '复制样品', material: '钢', sample_type: '1', price_note: 100,
+      test_item: '力学 - 拉伸', test_method: 'GB/T 1', quantity: 1, discount_rate: 0, unit: '次',
+      arrival_mode: 'delivery', sample_arrival_status: 'arrived', service_urgency: 'normal', department_id: 1
+    }]
+  });
+  assert.equal(added.length, 2);
+  assert.equal(added[1]._formal_new, true);
+  assert.equal(added[1].test_item_id, null);
+});
+test('正式项目未改动时不会用业务快照覆盖，清空备注则明确记录', async () => {
+  const unchanged=await validateFormalModificationReview(formalConnection,'O1',{baseline:formalBaseline,items:formalBaseline});
+  assert.deepEqual(unchanged[0].modified_fields,[]);
+  const cleared=await validateFormalModificationReview(formalConnection,'O1',{baseline:formalBaseline,items:[{...formalBaseline[0],note:''}]});
+  assert.deepEqual(modificationItemUpdates(cleared[0]),[{column:'note',value:null}]);
+});
+
+test('修改审批支持开单表格中的报价、单位、折扣、流转和加急字段', async () => {
+  const baseline = [{
+    ...formalBaseline[0], price_note: 100, unit: '次', discount_rate: 10,
+    seq_no: 1, service_urgency: 'normal'
+  }];
+  const conn = { async query(sql) { assert.match(sql, /FOR UPDATE/); return [structuredClone(baseline)]; } };
+  const [item] = await validateFormalModificationReview(conn, 'O1', {
+    baseline,
+    items: [{ ...baseline[0], price_note: '120', unit: '机时', discount_rate: '25', seq_no: 2, service_urgency: 'urgent_1_5x' }]
+  });
+  assert.deepEqual(item.modified_fields, ['price_note', 'unit', 'discount_rate', 'seq_no', 'service_urgency']);
+  assert.deepEqual(modificationItemUpdates(item), [
+    { column: 'price_note', value: '120' },
+    { column: '`unit`', value: '机时' },
+    { column: 'discount_rate', value: '25' },
+    { column: 'seq_no', value: 2 },
+    { column: 'service_urgency', value: 'urgent_1_5x' }
+  ]);
+});
+
+
+test('审批同时自动同步报告勾选，并仅更新人工调整的正式项目', async () => {
+  const calls=[];
+  const conn={async query(sql,params){
+    calls.push({sql,params});
+    if(sql.includes('FROM test_items ti')) return [structuredClone(formalBaseline)];
+    if(sql.includes('SELECT order_id FROM orders')) return [[{order_id:'O1'}]];
+    if(sql.includes('FROM test_items WHERE test_item_id')) return [[formalBaseline[0]]];
+    return [{affectedRows:1}];
+  }};
+  const businessItems=Array.from({length:5},(_,i)=>({test_item:'业务项目'+i,quantity:99}));
+  const payload={workflow:{modifiedFields:['reportSeals']},formSnapshot:{businessTestItems:businessItems},
+    commissionData:{customerId:1,orderInfo:{report_seals:['normal','cnas']},testItems:businessItems}};
+  const formalItems=await validateFormalModificationReview(conn,'O1',{baseline:formalBaseline,items:[{...formalBaseline[0],quantity:7}]});
+  await applyOrderModification(conn,'O1',{...payload,commissionData:{...payload.commissionData,testItems:formalItems}});
+  const writes=calls.filter(call=>/UPDATE test_items/.test(call.sql));
+  assert.equal(writes.length,1);
+  assert.deepEqual(writes[0].params,[7,88,'O1']);
+  assert.deepEqual(calls.find(call=>/UPDATE reports/.test(call.sql)).params,['["normal","cnas"]','O1']);
+  assert.equal(payload.formSnapshot.businessTestItems.length,5);
+  assert.equal(payload.formSnapshot.businessTestItems[0].quantity,99);
 });

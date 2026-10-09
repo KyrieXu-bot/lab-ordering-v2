@@ -18,7 +18,13 @@ axios.interceptors.response.use(
 )
 
 export const login = (username, password) => axios.post('/api/auth/login', { username, password })
+export const getNotifications = (params = {}) => axios.get('/api/notifications', { params })
+export const markNotificationRead = (id) => axios.post(`/api/notifications/${id}/read`)
+export const markAllNotificationsRead = () => axios.post('/api/notifications/read-all')
 export const getOrderRequests = (params = {}) => axios.get('/api/order-requests', { params })
+export const getOrderRequestMonths = () => axios.get('/api/order-requests/review-months')
+export const exportOrderRequestRejections = (params = {}) =>
+  axios.get('/api/order-requests/rejection-export', { params, responseType: 'blob' })
 export const getOrderRequestPrefill = (orderNum) =>
   axios.get('/api/order-requests/prefill', { params: { orderNum } })
 export const getOrderRequest = (id) => axios.get(`/api/order-requests/${id}`)
@@ -43,8 +49,8 @@ export const deleteOrderRequestFile = (requestId, fileId) =>
   axios.delete(`/api/order-requests/${requestId}/files/${fileId}`)
 export const withdrawOrderRequest = (id) => axios.post(`/api/order-requests/${id}/withdraw`)
 export const returnOrderRequest = (id, note) => axios.post(`/api/order-requests/${id}/return`, { note })
-export const approveOrderRequest = (id, note = '', version) =>
-  axios.post(`/api/order-requests/${id}/approve`, { note, version })
+export const approveOrderRequest = (id, note = '', version, formalReview) =>
+  axios.post(`/api/order-requests/${id}/approve`, { note, version, formalReview })
 export const openOrderRequest = (id, payload, version) =>
   axios.post(`/api/order-requests/${id}/open`, { payload, version })
 export const generateOrderRequestPdf = (id) =>

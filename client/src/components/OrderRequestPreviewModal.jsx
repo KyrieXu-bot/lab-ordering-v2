@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { downloadOrderRequestFile, getCommission, getCommissionerSignature, getOrderRequest, getOrderRequestFiles, getSalespersonSignature } from '../api/api'
+import { downloadOrderRequestFile, getCommissionerSignature, getOrderRequest, getOrderRequestFiles, getSalespersonSignature } from '../api/api'
 import '../css/OrderRequestPreview.css'
 
 const mark = (value) => value ? '☑' : '☐'
@@ -15,7 +15,6 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
   const [packet, setPacket] = useState(livePacket || null)
   const [comparisonPacket, setComparisonPacket] = useState(null)
   const [aggregatedAdditionalPackets, setAggregatedAdditionalPackets] = useState([])
-  const [officialOrderItems, setOfficialOrderItems] = useState([])
   const [meta, setMeta] = useState(requestMeta || null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -38,7 +37,6 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
     setPacket(livePacket || null)
     setComparisonPacket(null)
     setAggregatedAdditionalPackets([])
-    setOfficialOrderItems([])
     setResolvedRelatedRequestIds([])
     setMeta(requestMeta || null)
     if (!requestId) return
@@ -47,15 +45,6 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
     getOrderRequest(requestId)
       .then(async ({ data }) => {
         if (!active) return
-        const loadOfficialOrderItems = async (orderId) => {
-          if (!orderId) return []
-          try {
-            const response = await getCommission(orderId)
-            return normalizeItems(response.data?.testItems || [])
-          } catch (_) {
-            return []
-          }
-        }
         const loadRelatedRequests = async (primary) => {
           const stableRelatedRequestIds = relatedRequestIdsKey ? relatedRequestIdsKey.split(',') : []
           const serverRelatedRequestIds = asArray(primary.related_request_ids)
@@ -78,16 +67,15 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
             if (!active) return
             setResolvedRelatedRequestIds(relatedRequests.map((item) => item.request_id))
             const baseRequest = [...relatedRequests]
-              .filter((item) => item.request_type !== 'additional_test' && item.status !== 'withdrawn')
+              .filter((item) => item.request_type !== 'additional_test' && (item.status === 'approved' || String(item.request_id) === String(data.request_id)))
               .sort((a, b) => Number(b.request_id) - Number(a.request_id))[0] || data
             setMeta({ ...baseRequest, ...(requestMeta || {}), request_type: 'additional_test', base_submitted_at: baseRequest.submitted_at })
-            setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
-            setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
+            setPacket(baseRequest.submitted_payload || baseRequest.reviewed_payload || {})
             setAggregatedAdditionalPackets([
               ...relatedRequests
-                .filter((item) => item.request_type === 'additional_test' && item.status !== 'withdrawn' && String(item.request_id) !== String(data.request_id))
+                .filter((item) => item.request_type === 'additional_test' && Number(item.request_id) > Number(baseRequest.request_id) && (item.status === 'approved' || String(item.request_id) === String(data.request_id)) && String(item.request_id) !== String(data.request_id))
                 .sort((a, b) => Number(a.request_id) - Number(b.request_id))
-                .map((item) => ({ packet: item.reviewed_payload || item.submitted_payload || {}, submittedAt: item.submitted_at, appliedAt: item.applied_at })),
+                .map((item) => ({ packet: item.submitted_payload || item.reviewed_payload || {}, submittedAt: item.submitted_at, appliedAt: item.applied_at })),
               { packet: livePacket, submittedAt: new Date().toISOString(), appliedAt: null }
             ])
             return
@@ -99,17 +87,21 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
             base_submitted_at: liveRequestType === 'modification' ? new Date().toISOString() : data.submitted_at
           })
           setPacket(livePacket)
-          setOfficialOrderItems(await loadOfficialOrderItems(data.display_order_id || data.approved_order_id || data.target_order_id))
-          if (['modification', 'additional_test'].includes(liveRequestType)) {
+          if (liveRequestType === 'modification' && data.business_baseline_form) {
+            setComparisonPacket({ ...(data.business_baseline_payload || data.submitted_payload), formSnapshot: {
+              ...(data.business_baseline_payload || data.submitted_payload)?.formSnapshot, formData: data.business_baseline_form,
+              businessTestItems: data.business_baseline_items || []
+            } });
+          } else if (['modification', 'additional_test'].includes(liveRequestType)) {
             if (data.request_type === liveRequestType && data.parent_request_id) {
               try {
                 const parent = (await getOrderRequest(data.parent_request_id)).data
-                if (active) setComparisonPacket(parent.reviewed_payload || parent.submitted_payload || null)
+                if (active) setComparisonPacket(parent.submitted_payload || parent.reviewed_payload || null)
               } catch (_) {
                 if (active) setComparisonPacket(null)
               }
             } else {
-              setComparisonPacket(data.reviewed_payload || data.submitted_payload || null)
+              setComparisonPacket(data.submitted_payload || data.reviewed_payload || null)
             }
           }
           return
@@ -125,26 +117,30 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
         })
         setResolvedRelatedRequestIds(relatedRequests.map((item) => item.request_id))
         const baseRequest = [...relatedRequests]
-          .filter((item) => item.status !== 'withdrawn')
+          .filter((item) => item.status === 'approved' || String(item.request_id) === String(data.request_id))
           .sort((a, b) => Number(b.request_id) - Number(a.request_id))
           .find((item) => item.request_type !== 'additional_test') || data
         setMeta({ ...baseRequest, ...data, request_type: data.request_type, base_submitted_at: baseRequest.submitted_at })
-        setPacket(baseRequest.reviewed_payload || baseRequest.submitted_payload || {})
-        setOfficialOrderItems(await loadOfficialOrderItems(baseRequest.display_order_id || baseRequest.approved_order_id || baseRequest.target_order_id || data.display_order_id))
+        setPacket(baseRequest.submitted_payload || baseRequest.reviewed_payload || {})
         setAggregatedAdditionalPackets(relatedRequests
-          .filter((item) => item.request_type === 'additional_test' && item.status !== 'withdrawn')
+          .filter((item) => item.request_type === 'additional_test' && Number(item.request_id) > Number(baseRequest.request_id) && (item.status === 'approved' || String(item.request_id) === String(data.request_id)))
           .sort((a, b) => Number(a.request_id) - Number(b.request_id))
           .map((item) => ({
-            packet: item.reviewed_payload || item.submitted_payload || {},
+            packet: item.submitted_payload || item.reviewed_payload || {},
             submittedAt: item.submitted_at,
             appliedAt: item.applied_at
           })))
 
-        if (baseRequest.request_type === 'modification' && baseRequest.parent_request_id) {
+        if (baseRequest.request_type === 'modification' && baseRequest.business_baseline_form) {
+          setComparisonPacket({ ...(baseRequest.business_baseline_payload || baseRequest.submitted_payload), formSnapshot: {
+            ...(baseRequest.business_baseline_payload || baseRequest.submitted_payload)?.formSnapshot, formData: baseRequest.business_baseline_form,
+            businessTestItems: baseRequest.business_baseline_items || []
+          } });
+        } else if (baseRequest.request_type === 'modification' && baseRequest.parent_request_id) {
           try {
             const cachedParent = relatedRequests.find((item) => String(item.request_id) === String(baseRequest.parent_request_id))
             const parent = cachedParent || (await getOrderRequest(baseRequest.parent_request_id)).data
-            if (active) setComparisonPacket(parent.reviewed_payload || parent.submitted_payload || null)
+            if (active) setComparisonPacket(parent.submitted_payload || parent.reviewed_payload || null)
           } catch (_) {
             if (active) setComparisonPacket(null)
           }
@@ -162,14 +158,11 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
   ), [packet])
   const requestType = meta?.request_type || meta?.requestType
   const compareChanges = requestType === 'modification'
-    && Boolean(previousView || savedModificationBaselineItems.length || officialOrderItems.length)
+    && Boolean(previousView || savedModificationBaselineItems.length)
   const previousTestItems = useMemo(() => {
     if (savedModificationBaselineItems.length) return savedModificationBaselineItems
-    // 发起或编辑尚未审批的修改时，LIMS 正式项目就是精确的修改前基线。
-    // 对无基线的历史申请也优先避免拿业务原始快照误报整行修改。
-    if (officialOrderItems.length) return officialOrderItems
     return previousView?.items || []
-  }, [officialOrderItems, previousView, savedModificationBaselineItems])
+  }, [previousView, savedModificationBaselineItems])
   const highlightAddedItems = requestType === 'additional_test'
   const aggregatedAdditionalItems = useMemo(() => aggregatedAdditionalPackets.flatMap((entry) =>
     normalizePacket(entry.packet, {}).items.map((item) => ({
@@ -222,7 +215,8 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
     if (aggregatedAdditionalItems.length) {
       const mergedItems = view.items.map((item) => ({ ...item, previewAdded: false }))
       aggregatedAdditionalItems.forEach((trace) => {
-        const matchingIndex = mergedItems.findIndex((item) => samePreviewItem(item, trace))
+        const matchingIndex = mergedItems.findIndex((item) => samePreviewItem(item, trace)
+          && (trace.cancelled ? !item.cancelled : trace.restored ? item.cancelled : true))
         if (trace.cancelled) {
           if (matchingIndex >= 0) {
             mergedItems[matchingIndex] = {
@@ -255,13 +249,12 @@ export default function OrderRequestPreviewModal({ open, onClose, requestId, rel
       })
       return mergedItems
     }
-    if (!view.items.length && officialOrderItems.length) return officialOrderItems.map((item) => ({ ...item, previewAdded: item.isAddOn }))
     if (!highlightAddedItems || !previousView) return view.items.map(item => ({ ...item, previewAdded: false }))
     return [
       ...previousView.items.map(item => ({ ...item, previewAdded: false })),
       ...view.items.map(item => ({ ...item, previewAdded: true }))
     ]
-  }, [aggregatedAdditionalItems, highlightAddedItems, officialOrderItems, previousView, view.items])
+  }, [aggregatedAdditionalItems, highlightAddedItems, previousView, view.items])
   const modificationTraceNote = compareChanges ? `修改 · ${formatTraceTime(meta?.submitted_at || meta?.submittedAt)}` : ''
 
   useEffect(() => {
@@ -544,10 +537,15 @@ function itemFingerprint(item = {}) {
 }
 
 function samePreviewItem(left = {}, right = {}) {
+  const leftFingerprint = itemFingerprint(left)
+  const rightFingerprint = itemFingerprint(right)
+  const hasBusinessIdentity = (item) => [item.sampleName, item.material, item.originalNo, item.testItem, item.method, item.quantity]
+    .some((value) => text(value).trim() !== '')
+  if (hasBusinessIdentity(left) && hasBusinessIdentity(right)) return leftFingerprint === rightFingerprint
   if (left.testItemId != null && right.testItemId != null) {
     return String(left.testItemId) === String(right.testItemId)
   }
-  return itemFingerprint(left) === itemFingerprint(right)
+  return false
 }
 
 function sampleTypeText(value, custom) { const labels = { 1:'板材', 2:'棒材', 3:'粉末', 4:'液体', 5:'其他' }; return custom || labels[value] || text(value) }

@@ -35,6 +35,7 @@ export default function SalesDashboard() {
   const [expandedGroups, setExpandedGroups] = useState({})
   const [changeSource, setChangeSource] = useState(null)
   const [textDetail, setTextDetail] = useState(null)
+  const [notificationRefreshKey, setNotificationRefreshKey] = useState(0)
   const tableWrapRef = useRef(null)
 
   async function load(targetPage = page) {
@@ -64,7 +65,12 @@ export default function SalesDashboard() {
     }, 300)
     return () => window.clearTimeout(timer)
   }, [searchInput])
-  useEffect(() => { load(page) }, [page, keyword, filter, requestTypeFilter])
+  useEffect(() => { load(page) }, [page, keyword, filter, requestTypeFilter, notificationRefreshKey])
+  useEffect(() => {
+    const refreshFromNotification = () => setNotificationRefreshKey((value) => value + 1)
+    window.addEventListener('ordering:notifications', refreshFromNotification)
+    return () => window.removeEventListener('ordering:notifications', refreshFromNotification)
+  }, [])
 
   function changeFilter(nextFilter) {
     setFilter(nextFilter)
@@ -156,9 +162,9 @@ export default function SalesDashboard() {
           {error && <div className="portal-error">{error}</div>}
           <div className="portal-table-wrap portal-table-scroll" ref={tableWrapRef}>
             <table className="portal-table grouped-request-table">
-              <thead><tr><th className="formal-order-col">正式单号</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th className="request-latest-col">最近申请</th><th className="request-history-col">申请历程</th><th className="request-applicant-col">申请人</th><th className="salesperson-name-col">业务员（服务方）</th><th className="request-status-col">当前状态</th><th className="request-note-cell">备注</th><th className="portal-actions grouped-request-actions">操作</th></tr></thead>
+              <thead><tr><th className="formal-order-col">正式单号</th><th className="commissioner-name-col">委托方</th><th className="commissioner-contact-col">委托人</th><th className="request-latest-col">最近申请</th><th className="request-history-col">申请历程</th><th className="request-applicant-col">申请人</th><th className="salesperson-name-col">业务员（服务方）</th><th className="request-status-col">当前状态</th><th className="request-application-time-col">申请时间</th><th className="request-note-cell">备注</th><th className="portal-actions grouped-request-actions">操作</th></tr></thead>
               <tbody>
-                {loading ? <tr><td colSpan="10" className="portal-empty">正在加载…</td></tr> : groups.length === 0 ? <tr><td colSpan="10" className="portal-empty">{keyword ? '没有匹配的申请' : '当前筛选下没有委托申请'}</td></tr> : groups.map((group) => {
+                {loading ? <tr><td colSpan="11" className="portal-empty">正在加载…</td></tr> : groups.length === 0 ? <tr><td colSpan="11" className="portal-empty">{keyword ? '没有匹配的申请' : '当前筛选下没有委托申请'}</td></tr> : groups.map((group) => {
                   const row = group.latest
                   const expanded = Boolean(expandedGroups[group.key])
                   return <React.Fragment key={group.key}>
@@ -171,7 +177,8 @@ export default function SalesDashboard() {
                       <td className="request-applicant-col">{row.applicant_name || '—'}</td>
                       <td className="salesperson-name-col">{row.salesperson_name || '—'}</td>
                       <td className="request-status-col"><span className={`status-pill status-${row.display_status}`}>{statusText[row.display_status] || row.display_status}</span></td>
-                      <td className="request-note-cell"><TruncatedDetailLink value={group.opening.review_note} label="备注" onOpen={setTextDetail} /></td>
+                      <td className="request-application-time-col"><time dateTime={group.opening.submitted_at || ''}>{formatTime(group.opening.submitted_at)}</time></td>
+                      <td className="request-note-cell"><TruncatedDetailLink value={row.review_note} label="备注" onOpen={setTextDetail} /></td>
                       <td className="portal-actions grouped-request-actions">
                         {group.rows.length > 1 ? (
                           <>
@@ -191,7 +198,7 @@ export default function SalesDashboard() {
                         )}
                       </td>
                     </tr>
-                    {expanded && <tr className="request-history-row"><td colSpan="10"><div className="request-history-list">
+                    {expanded && <tr className="request-history-row"><td colSpan="11"><div className="request-history-list">
                       {group.rows.map(item => <div className="request-history-item" key={item.request_id}>
                         <span className={`request-type-pill type-${item.request_type || 'normal'}`}>{requestTypeText[item.request_type || 'normal']}</span>
                         <strong className="portal-mono request-history-number">{item.request_no}</strong>

@@ -110,6 +110,25 @@ test('加测取消按项目逐行移除，不会误删内容相同的另一行',
   assert.equal(result.testItems[0].test_item, '相同项目');
 });
 
+test('业务行误带相同 LIMS ID 时仍按业务内容取消两条指定项目', () => {
+  const original = {
+    templateData: { customer_name: '测试客户' },
+    formSnapshot: { businessTestItems: [
+      { test_item_id: 21966, sampleName: '样品A', test_item: 'SEM', test_method: '标准A', quantity: 2 },
+      { test_item_id: 21966, sampleName: '样品A', test_item: '拉曼', test_method: '标准B', quantity: 2 },
+      { test_item_id: 21966, sampleName: '样品A', test_item: 'CP', test_method: '标准C', quantity: 2 }
+    ] }
+  };
+  const addOn = { formSnapshot: { businessTestItems: [
+    { test_item_id: 21966, sampleName: '样品A', test_item: 'SEM', test_method: '标准A', quantity: 2, cancelled_in_additional_test: true },
+    { test_item_id: 21966, sampleName: '样品A', test_item: 'CP', test_method: '标准C', quantity: 2, cancelled_in_additional_test: true },
+    { sampleName: '新增样品', test_item: 'FIB', test_method: '标准D', quantity: 1 }
+  ] } };
+
+  const result = buildOrderRequestPdfTemplateData(original, original, 'JC26100005', [addOn]);
+  assert.deepEqual(result.testItems.map((item) => item.test_item), ['拉曼', 'FIB']);
+});
+
 test('加测申请补充的其他要求进入重新生成的客户 PDF', () => {
   const original = {
     templateData: { customer_name: '苏州大学', other_requirements: '原要求' },
@@ -248,4 +267,17 @@ test('历史申请没有模板日期时使用最初提交日期作为 PDF 日期
 
   assert.equal(result.customer_signature_date, '2026-08-19');
   assert.equal(result.sales_signature_date, '2026-08-19');
+});
+
+
+test('修改 PDF 始终使用业务五行 JSON，忽略独立正式合并项目', () => {
+  const businessItems=Array.from({length:5},(_,i)=>({sampleName:'业务样品'+i,test_item:'业务项目'+i,quantity:i+10}));
+  const modification={workflow:{requestType:'modification'},templateData:{other_requirements:'修改后要求'},
+    formSnapshot:{businessTestItems:businessItems},
+    commissionData:{testItems:[{test_item_id:88,test_item:'LIMS合并项目',quantity:99}]}};
+  const result=buildOrderRequestPdfTemplateData(modification,{templateData:{},formSnapshot:{businessTestItems:[{test_item:'旧项目'}]}},'O1');
+  assert.equal(result.testItems.length,5);
+  assert.deepEqual(result.testItems.map(item=>item.test_item),businessItems.map(item=>item.test_item));
+  assert.equal(result.testItems[0].quantity,10);
+  assert.equal(result.other_requirements,'修改后要求');
 });

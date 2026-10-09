@@ -28,15 +28,19 @@ import {
   downloadOrderRequestFile,
   deleteOrderRequestFile,
   openOrderRequest,
+  approveOrderRequest,
+  returnOrderRequest,
   generateOrderRequestPdf,
   downloadOrderRequestTestItemsWord
 } from '../api/api';
 import { useNavigate } from 'react-router-dom';
 import { getSession } from '../auth';
 import OrderRequestPreviewModal from '../components/OrderRequestPreviewModal';
+import { BusinessModificationItems } from '../components/ModificationReviewItems';
+import ReturnReasonSelector, { resolveReturnReason } from '../components/ReturnReasonSelector';
 import '../css/Form.css'
 
-function AutoGrowTextarea({ value, onChange, className = '', ...props }) {
+function AutoGrowTextarea({ value, onChange, className = '', rows = 1, ...props }) {
   const textareaRef = useRef(null);
 
   const resize = () => {
@@ -48,11 +52,30 @@ function AutoGrowTextarea({ value, onChange, className = '', ...props }) {
 
   useLayoutEffect(resize, [value]);
 
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof ResizeObserver === 'undefined') return undefined;
+    let lastWidth = textarea.getBoundingClientRect().width;
+    let animationFrame = null;
+    const observer = new ResizeObserver(([entry]) => {
+      const nextWidth = entry?.contentRect?.width ?? textarea.getBoundingClientRect().width;
+      if (Math.abs(nextWidth - lastWidth) < 0.5) return;
+      lastWidth = nextWidth;
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(resize);
+    });
+    observer.observe(textarea);
+    return () => {
+      observer.disconnect();
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+    };
+  }, []);
+
   return (
     <textarea
       {...props}
       ref={textareaRef}
-      rows={1}
+      rows={rows}
       className={`auto-grow-textarea ${className}`.trim()}
       value={value}
       onChange={(event) => {
@@ -62,6 +85,10 @@ function AutoGrowTextarea({ value, onChange, className = '', ...props }) {
     />
   );
 }
+
+const BUSINESS_COLUMN_DEFAULT_WIDTHS = [3.5, 6.5, 6.5, 6.5, 8.5, 15, 15, 6.5, 5, 4, 15, 8];
+const BUSINESS_COLUMN_MIN_WIDTHS_PX = [42, 80, 80, 80, 90, 120, 120, 76, 62, 55, 120, 84];
+const BUSINESS_COLUMN_LABELS = ['序号', '样品名称', '材质', '样品类型', '样品原号', '检测项目', '检测标准', '到达方式', '是否到达', '数量', '备注', '操作'];
 
 function buildOrderUrgencySymbols(value = 'normal') {
   const urgency = ['normal', 'urgent_1_5x', 'urgent_2x'].includes(value) ? value : 'normal';
@@ -135,30 +162,48 @@ function mergeModificationItemFallbacks(officialItems, businessItems) {
 }
 
 function sameWorkflowTestItem(left = {}, right = {}) {
+  const fields = ['sampleName', 'material', 'sampleType', 'original_no', 'test_item', 'test_method', 'quantity'];
+  const value = (item, field) => item?.[field]
+    ?? item?.[field === 'sampleName' ? 'sample_name' : field === 'sampleType' ? 'sample_type' : field] ?? '';
+  const leftHasBusinessIdentity = fields.some((field) => String(value(left, field)).trim() !== '');
+  const rightHasBusinessIdentity = fields.some((field) => String(value(right, field)).trim() !== '');
+  if (leftHasBusinessIdentity && rightHasBusinessIdentity) {
+    return fields.every((field) => String(value(left, field)).trim() === String(value(right, field)).trim());
+  }
   const leftId = left.test_item_id ?? left.testItemId;
   const rightId = right.test_item_id ?? right.testItemId;
-  if (leftId != null && rightId != null && String(leftId) === String(rightId)) return true;
-  return ['sampleName', 'material', 'sampleType', 'original_no', 'test_item', 'test_method', 'quantity']
-    .every((field) => String(left?.[field] ?? left?.[field === 'sampleName' ? 'sample_name' : field] ?? '').trim()
-      === String(right?.[field] ?? right?.[field === 'sampleName' ? 'sample_name' : field] ?? '').trim());
+  return leftId != null && rightId != null && String(leftId) === String(rightId);
 }
 
-function applyHistoricalCancellationStates(items, states) {
+function matchWorkflowOperations(items = [], operations = []) {
+  const usedOperationIndexes = new Set();
   return items.map((item) => {
-    const state = states.find((candidate) => sameWorkflowTestItem(item, candidate));
-    if (!state) return { ...item, _cancellationBaseline: false };
-    const cancelled = Boolean(state.cancelled_in_additional_test || state.cancelled);
-    return {
-      ...item,
-      cancelled_in_additional_test: cancelled,
-      cancelled_at: cancelled ? (state.cancelled_at || state.cancelledAt || null) : null,
-      _cancellationBaseline: cancelled,
-      _historicalCancellation: true,
-      _historicalCancelledAt: state.cancelled_at || state.cancelledAt || null,
-      _restoredCancellationHistory: Boolean(state.restored_in_additional_test || state.restored),
-      _historicalRestoredAt: state.restored_at || state.restoredAt || null
-    };
+    const operationIndex = operations.findIndex((candidate, index) => (
+      !usedOperationIndexes.has(index) && sameWorkflowTestItem(item, candidate)
+    ));
+    if (operationIndex < 0) return null;
+    usedOperationIndexes.add(operationIndex);
+    return operations[operationIndex];
   });
+}
+
+function withCancellationBaseline(item = {}) {
+  const cancelled = Boolean(item.cancelled_in_additional_test);
+  const restored = Boolean(item.restored_in_additional_test);
+  return {
+    ...item,
+    _cancellationBaseline: cancelled,
+    _historicalCancellation: cancelled || restored,
+    _historicalCancelledAt: item.cancelled_at || null,
+    _restoredCancellationHistory: restored,
+    _historicalRestoredAt: item.restored_at || null
+  };
+}
+
+function hasCancellationStateChange(item = {}) {
+  if (!item._locked) return false;
+  return Boolean(item.cancelled_in_additional_test) !== Boolean(item._cancellationBaseline)
+    || Boolean(item.restored_in_additional_test);
 }
 
 function buildRequestTemplateData(commissionData, context) {
@@ -420,6 +465,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [commissionerSignatureUploading, setCommissionerSignatureUploading] = useState(false);
   const [commissionerSignatureRefresh, setCommissionerSignatureRefresh] = useState(0);
   const commissionerSignatureInputRef = useRef(null);
+  const [businessColumnWidths, setBusinessColumnWidths] = useState(() => [...BUSINESS_COLUMN_DEFAULT_WIDTHS]);
+  const businessTableRef = useRef(null);
+  const businessColumnResizeRef = useRef(null);
   const [customers, setCustomers] = useState([]);
   const [payers, setPayers] = useState([]);
   const [prefillPayers, setPrefillPayers] = useState([]);
@@ -457,6 +505,23 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [requestMeta, setRequestMeta] = useState(null);
   const isModificationMode = workflowMode === 'change' || (workflowMode === 'edit' && requestMeta?.requestType === 'modification');
   const isAdditionalTestMode = workflowMode === 'additionalTest' || (workflowMode === 'edit' && requestMeta?.requestType === 'additional_test');
+  const isReviewingModification = workflowMode === 'review' && requestMeta?.requestType === 'modification';
+  const [formalModificationBaseline, setFormalModificationBaseline] = useState([]);
+  const [modificationReviewBusy, setModificationReviewBusy] = useState(false);
+  const [modificationApproved, setModificationApproved] = useState(false);
+  const [reviewNote, setReviewNote] = useState('');
+  const [returnReason, setReturnReason] = useState('');
+  const [otherReturnReason, setOtherReturnReason] = useState('');
+  const [businessBaselineForm, setBusinessBaselineForm] = useState(null);
+  const baselineValue = (field) => field.split('.').reduce((value,key) => value?.[key], businessBaselineForm);
+  const modificationFieldChanged = (field) => isReviewingModification && modifiedFormFields.includes(field);
+  const modificationChoiceChanged = (field, value, checked) => {
+    if (!isReviewingModification) return false;
+    if (!businessBaselineForm) return modificationFieldChanged(field);
+    const previous = baselineValue(field);
+    const wasChecked = Array.isArray(previous) ? previous.map(String).includes(String(value)) : String(previous ?? '') === String(value);
+    return wasChecked !== checked;
+  };
   const isReviewingAdditionalTest = workflowMode === 'review' && requestMeta?.requestType === 'additional_test';
   const isAdditionalTestWorkflow = isAdditionalTestMode || isReviewingAdditionalTest;
   const isSalesRequestMode = ['request', 'edit', 'change', 'additionalTest'].includes(workflowMode);
@@ -472,6 +537,78 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   const [showRequestPreview, setShowRequestPreview] = useState(false);
   const [draftSaving, setDraftSaving] = useState(false);
   const [sampleRequirementsExpanded, setSampleRequirementsExpanded] = useState(false);
+
+  useEffect(() => {
+    const handlePointerMove = (event) => {
+      const resizeState = businessColumnResizeRef.current;
+      if (!resizeState || event.pointerId !== resizeState.pointerId) return;
+      const deltaPercent = ((event.clientX - resizeState.startX) / resizeState.tableWidth) * 100;
+      const combinedWidth = resizeState.leftWidth + resizeState.rightWidth;
+      const nextLeftWidth = Math.min(
+        combinedWidth - resizeState.minRightWidth,
+        Math.max(resizeState.minLeftWidth, resizeState.leftWidth + deltaPercent)
+      );
+      setBusinessColumnWidths((currentWidths) => {
+        const nextWidths = [...currentWidths];
+        nextWidths[resizeState.columnIndex] = nextLeftWidth;
+        nextWidths[resizeState.columnIndex + 1] = combinedWidth - nextLeftWidth;
+        return nextWidths;
+      });
+    };
+    const finishColumnResize = (event) => {
+      const resizeState = businessColumnResizeRef.current;
+      if (!resizeState || (event?.pointerId != null && event.pointerId !== resizeState.pointerId)) return;
+      businessColumnResizeRef.current = null;
+      document.body.classList.remove('business-column-resizing');
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', finishColumnResize);
+    window.addEventListener('pointercancel', finishColumnResize);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', finishColumnResize);
+      window.removeEventListener('pointercancel', finishColumnResize);
+      document.body.classList.remove('business-column-resizing');
+    };
+  }, []);
+
+  function beginBusinessColumnResize(columnIndex, event) {
+    if (event.button !== 0 || columnIndex >= BUSINESS_COLUMN_DEFAULT_WIDTHS.length - 1) return;
+    const tableWidth = businessTableRef.current?.getBoundingClientRect().width || 0;
+    if (!tableWidth) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const combinedWidth = businessColumnWidths[columnIndex] + businessColumnWidths[columnIndex + 1];
+    const rawMinLeftWidth = (BUSINESS_COLUMN_MIN_WIDTHS_PX[columnIndex] / tableWidth) * 100;
+    const rawMinRightWidth = (BUSINESS_COLUMN_MIN_WIDTHS_PX[columnIndex + 1] / tableWidth) * 100;
+    const minimumScale = Math.min(1, combinedWidth / (rawMinLeftWidth + rawMinRightWidth));
+    businessColumnResizeRef.current = {
+      columnIndex,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      tableWidth,
+      leftWidth: businessColumnWidths[columnIndex],
+      rightWidth: businessColumnWidths[columnIndex + 1],
+      minLeftWidth: rawMinLeftWidth * minimumScale,
+      minRightWidth: rawMinRightWidth * minimumScale
+    };
+    document.body.classList.add('business-column-resizing');
+  }
+
+  function renderBusinessColumnResizer(columnIndex) {
+    const leftLabel = BUSINESS_COLUMN_LABELS[columnIndex];
+    const rightLabel = BUSINESS_COLUMN_LABELS[columnIndex + 1];
+    return (
+      <span
+        className="business-column-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`调整${leftLabel}和${rightLabel}列宽`}
+        title="左右拖动调整列宽；刷新页面后恢复默认宽度"
+        onPointerDown={(event) => beginBusinessColumnResize(columnIndex, event)}
+      />
+    );
+  }
 
   // 静态部门数据（与后端 departments 对应）
   const departments = [
@@ -579,60 +716,29 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           navigate('/', { replace: true });
           return;
         }
-        if (workflowMode === 'review' && (data.status !== 'approved' || data.order_opened)) {
+        if (workflowMode === 'review' && (data.request_type === 'modification' ? data.status !== 'submitted' : (data.status !== 'approved' || data.order_opened))) {
           alert(data.order_opened ? '该申请已经完成开单' : '申请尚未审批通过，不能开单');
           navigate(`/requests/${requestId}`, { replace: true });
           return;
         }
-        const packet = data.reviewed_payload || data.submitted_payload || {};
+        const packet = data.request_type === 'modification'
+          ? (data.submitted_payload || data.reviewed_payload || {})
+          : (data.reviewed_payload || data.submitted_payload || {});
+        if (workflowMode === 'review' && data.request_type === 'modification') {
+          if (!Array.isArray(data.formal_test_items)) throw new Error('正式检测项目加载失败');
+          setFormalModificationBaseline(data.formal_test_items);
+          setBusinessBaselineForm(data.business_baseline_form);
+          setSampleRequirementsExpanded(true);
+        }
         const snapshot = packet.formSnapshot || {};
         const reviewingAdditionalTest = workflowMode === 'review' && data.request_type === 'additional_test';
         const loadingModificationItems = workflowMode === 'change' || loadedModification;
-        let existingOfficialItems = [];
-        if ((reviewingAdditionalTest || loadingModificationItems || loadedAdditionalTest) && data.display_order_id) {
-          const { data: existingCommission } = await getCommission(data.display_order_id);
-          existingOfficialItems = (existingCommission.testItems || []).map((item) => {
-            const { sampleType, sampleTypeCustom, seq_no } = normalizePrefillTestItemFields(item);
-            return {
-              ...item,
-              sampleName: item.sample_name != null ? item.sample_name : (item.sampleName || ''),
-              sampleType,
-              ...(sampleType === '5' && sampleTypeCustom ? { sampleTypeCustom } : {}),
-              unit: item.unit || '',
-              arrival_mode: item.arrival_mode === 'delivery' ? 'mail' : (item.arrival_mode || ''),
-              sample_arrival_status: item.sample_arrival_status || 'arrived',
-              discount_rate: item.discount_rate ?? '',
-              service_urgency: item.service_urgency || 'normal',
-              seq_no,
-              _locked: reviewingAdditionalTest || loadedAdditionalTest,
-              _modificationNameLocked: loadingModificationItems,
-              _existingOfficial: true
-            };
-          });
-          if (loadedAdditionalTest && Array.isArray(data.additional_item_states)) {
-            existingOfficialItems = applyHistoricalCancellationStates(existingOfficialItems, data.additional_item_states);
-          }
-        }
         const storedBusinessItems = Array.isArray(snapshot.businessTestItems)
           ? snapshot.businessTestItems
           : (!data.reviewed_payload && Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
         const storedModificationBaseline = Array.isArray(snapshot.modificationBaselineTestItems)
           ? snapshot.modificationBaselineTestItems
           : [];
-        if (reviewingAdditionalTest && existingOfficialItems.length) {
-          const currentOperations = storedBusinessItems.filter((item) => item.cancelled_in_additional_test || item.restored_in_additional_test);
-          existingOfficialItems = existingOfficialItems.map((item) => {
-            const operation = currentOperations.find((candidate) => sameWorkflowTestItem(item, candidate));
-            if (!operation) return item;
-            return {
-              ...item,
-              cancelled_in_additional_test: Boolean(operation.cancelled_in_additional_test),
-              cancelled_at: operation.cancelled_in_additional_test ? operation.cancelled_at : null,
-              restored_in_additional_test: Boolean(operation.restored_in_additional_test),
-              restored_at: operation.restored_in_additional_test ? operation.restored_at : null
-            };
-          });
-        }
         const reviewerPrefillItems = storedBusinessItems
           .filter((item) => !item._locked && !item.cancelled_in_additional_test && !item.restored_in_additional_test)
           .map((item) => ({
@@ -664,8 +770,16 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         }));
         setBusinessTestItemsSnapshot(storedBusinessItems);
         setModifiedFormFields(Array.isArray(packet.workflow?.modifiedFields) ? packet.workflow.modifiedFields : []);
+        const businessFollowUpItems = Array.isArray(data.business_follow_up_items)
+          ? data.business_follow_up_items.map((item) => ({ ...item }))
+          : storedBusinessItems.map((item) => ({ ...item }));
+        const businessBaselineItems = Array.isArray(data.business_baseline_items)
+          ? data.business_baseline_items.map((item) => ({ ...item }))
+          : storedModificationBaseline.map((item) => ({ ...item }));
+        // 业务修改的显示、编辑和批注基线全部来自开单系统的业务版本链。
+        // LIMS 正式项目在独立审批编辑区按真实 ID 更新，不能进入业务表单快照。
         setModificationBaselineTestItems(loadingModificationItems
-          ? (storedModificationBaseline.length ? storedModificationBaseline : existingOfficialItems)
+          ? (loadedModification && workflowMode !== 'change' ? businessBaselineItems : businessFollowUpItems)
           : []);
         if (snapshot.formData) {
           const separateBusinessItems = workflowMode === 'review' || workflowMode === 'view';
@@ -673,39 +787,74 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             ? snapshot.formData.testItems
             : [];
           if (workflowMode === 'review') {
-            officialItems = reviewingAdditionalTest
-              ? [...existingOfficialItems, ...reviewerPrefillItems]
-              : reviewerPrefillItems;
+            if (data.request_type === 'modification') {
+              officialItems = data.formal_test_items.map((item) => {
+                const { sampleType, sampleTypeCustom, seq_no } = normalizePrefillTestItemFields(item);
+                return {
+                  ...item,
+                  sampleName: item.sample_name ?? '',
+                  sampleType,
+                  ...(sampleType === '5' && sampleTypeCustom ? { sampleTypeCustom } : {}),
+                  unit: item.unit || '',
+                  discount_rate: item.discount_rate ?? '',
+                  price_note: item.price_note ?? '',
+                  arrival_mode: item.arrival_mode === 'delivery' ? 'mail' : (item.arrival_mode || ''),
+                  sample_arrival_status: item.sample_arrival_status || '',
+                  service_urgency: item.service_urgency || 'normal',
+                  seq_no,
+                  _formalModification: true
+                };
+              });
+            } else if (reviewingAdditionalTest) {
+              const baselineBusinessItems = Array.isArray(data.business_baseline_items) ? data.business_baseline_items : [];
+              const operationItems = storedBusinessItems.filter((item) => item.cancelled_in_additional_test || item.restored_in_additional_test);
+              const matchedOperations = matchWorkflowOperations(baselineBusinessItems, operationItems);
+              officialItems = [
+                ...baselineBusinessItems.map((item, itemIndex) => {
+                  const baselineItem = withCancellationBaseline({ ...item, _locked: true });
+                  const operation = matchedOperations[itemIndex];
+                  if (!operation) return baselineItem;
+                  return {
+                    ...baselineItem,
+                    cancelled_in_additional_test: Boolean(operation.cancelled_in_additional_test),
+                    cancelled_at: operation.cancelled_in_additional_test ? operation.cancelled_at : null,
+                    restored_in_additional_test: Boolean(operation.restored_in_additional_test),
+                    restored_at: operation.restored_in_additional_test ? operation.restored_at : null
+                  };
+                }),
+                ...reviewerPrefillItems
+              ];
+            } else {
+              officialItems = reviewerPrefillItems;
+            }
           }
-          // 新一轮加测必须以 LIMS 当前正式项目为基线，其中包含此前已经完成录入的
-          // 所有加测项目。此前这里仍使用最初业务申请快照，导致二次加测看不到上一次加测。
-          let modificationSourceItems = workflowMode === 'additionalTest' && existingOfficialItems.length
-            ? existingOfficialItems
-            : loadingModificationItems && existingOfficialItems.length
-              ? mergeModificationItemFallbacks(existingOfficialItems, storedBusinessItems)
+          // 新一轮加测只继承业务历次申请项目。LIMS 正式项目由开单员在 LIMS 维护，
+          // 无论名称、标准或数量如何变化，都不得反向进入业务申请快照。
+          let modificationSourceItems = workflowMode === 'additionalTest' && Array.isArray(data.business_follow_up_items)
+            ? data.business_follow_up_items.map(withCancellationBaseline)
+            : workflowMode === 'change'
+              ? businessFollowUpItems
               : storedBusinessItems;
           if (workflowMode === 'edit' && loadedModification && storedBusinessItems.length) {
-            modificationSourceItems = storedBusinessItems.map((item, index) => {
-              const officialItem = existingOfficialItems.find((candidate) => item.test_item_id
-                && String(candidate.test_item_id) === String(item.test_item_id)) || existingOfficialItems[index] || {};
-              return {
-                ...officialItem,
-                ...item,
-                sampleName: item.sampleName ?? item.sample_name ?? officialItem.sampleName ?? officialItem.sample_name ?? '',
-                _existingOfficial: true,
-                _modificationNameLocked: true
-              };
-            });
+            modificationSourceItems = storedBusinessItems.map((item) => ({
+              ...item,
+              sampleName: item.sampleName ?? item.sample_name ?? '',
+              _modificationNameLocked: true
+            }));
           }
-          if (workflowMode === 'edit' && loadedAdditionalTest && existingOfficialItems.length) {
+          if (workflowMode === 'edit' && loadedAdditionalTest) {
             const operationItems = storedBusinessItems.filter((item) => item.cancelled_in_additional_test || item.restored_in_additional_test);
+            const baselineBusinessItems = Array.isArray(data.business_baseline_items) ? data.business_baseline_items : [];
+            const matchedOperations = matchWorkflowOperations(baselineBusinessItems, operationItems);
             modificationSourceItems = [
-              ...existingOfficialItems.map((item) => {
-                const operation = operationItems.find((candidate) => sameWorkflowTestItem(item, candidate));
-                if (!operation) return item;
+              ...baselineBusinessItems.map((item, itemIndex) => {
+                const baselineItem = withCancellationBaseline(item);
+                const operation = matchedOperations[itemIndex];
+                if (!operation) return { ...baselineItem, _locked: true };
                 if (operation.restored_in_additional_test) {
                   return {
-                    ...item,
+                    ...baselineItem,
+                    _locked: true,
                     cancelled_in_additional_test: false,
                     cancelled_at: null,
                     restored_in_additional_test: true,
@@ -713,7 +862,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                   };
                 }
                 return {
-                  ...item,
+                  ...baselineItem,
+                  _locked: true,
                   cancelled_in_additional_test: true,
                   cancelled_at: operation.cancelled_at,
                   restored_in_additional_test: false,
@@ -920,6 +1070,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     unit_price: p.amount != null && String(p.amount).trim() !== '' ? p.amount : null,
     department_id: p.department_id,
     group_id: p.group_id,
+    is_outsourced: Boolean(p.is_outsourced),
     discount_rate: '',
     service_urgency: 'normal'
   });
@@ -1569,7 +1720,14 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const duplicateTestItem = (index) => {
     if (isModificationMode || formData.testItems[index]?._locked) return;
-    setFormData(prev => { const items = [...prev.testItems]; const copy = { ...items[index] }; items.splice(index + 1, 0, copy); return { ...prev, testItems: items }; });
+    setFormData(prev => {
+      const items = [...prev.testItems];
+      const copy = { ...items[index] };
+      // 审批修改时复制的是一条新的正式项目，不能沿用原 LIMS 主键。
+      if (isReviewingModification) delete copy.test_item_id;
+      items.splice(index + 1, 0, copy);
+      return { ...prev, testItems: items };
+    });
   };
 
   const downloadFile = (url, filename) => { const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); };
@@ -1773,6 +1931,36 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isReviewingModification) {
+      if (modificationReviewBusy || modificationApproved) return;
+      if (returnReason) { alert('驳回原因已填写，无法通过审批，请重新勾选。'); return; }
+      if (!window.confirm('确认通过修改申请？委托单信息按业务修改同步，检测项目按下方人工调整结果写入 LIMS，并重新生成 PDF。')) return;
+      setModificationReviewBusy(true);
+      let approved = false;
+      try {
+        await approveOrderRequest(requestId, reviewNote, requestMeta?.version, {
+          baseline: formalModificationBaseline,
+          items: formData.testItems.map((item) => ({
+            ...item,
+            sample_name: item.sampleName ?? item.sample_name ?? '',
+            sample_type: String(item.sampleType) === '5' ? (item.sampleTypeCustom || '') : item.sampleType,
+            arrival_mode: item.arrival_mode === 'mail' ? 'delivery' : item.arrival_mode
+          }))
+        });
+        approved = true;
+        setModificationApproved(true);
+        await generateOrderRequestPdf(requestId);
+        alert('修改已审批并同步到 LIMS，PDF 已重新生成。');
+        navigate('/');
+      } catch (error) {
+        const message = error.response?.data?.message || error.message;
+        if (approved) {
+          alert('修改已审批并同步，但 PDF 生成失败：' + message + '。请在工作台重新生成 PDF。');
+          navigate('/');
+        } else alert(message || '修改审批失败');
+      } finally { setModificationReviewBusy(false); }
+      return;
+    }
     if (requiresCompleteSignatures && selectedCustomer && commissionerSignatureStatus !== 'ready') {
       if (commissionerSignatureStatus === 'loading' || commissionerSignatureUploading) {
         alert('正在检测或上传委托方签名，请稍后再提交。');
@@ -1871,8 +2059,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
     const submissionTestItems = formData.testItems;
 
     if (submissionTestItems.length === 0) { alert('提交失败！请至少添加一行检测项目'); return; }
-    if (isAdditionalTestWorkflow && !submissionTestItems.some(item => !item._locked)) {
-      alert('提交失败！请至少添加一行新的加测项目'); return;
+    if (isAdditionalTestWorkflow
+        && !submissionTestItems.some(item => !item._locked)
+        && !submissionTestItems.some(hasCancellationStateChange)) {
+      alert('提交失败！请至少添加一行新的加测项目，或取消/恢复一个原项目'); return;
     }
 
     for (let i = 0; i < submissionTestItems.length; i++) {
@@ -1949,7 +2139,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       ? submissionTestItems.filter(item => !item._locked)
       : submissionTestItems;
     const additionalSnapshotItems = isAdditionalTestWorkflow
-      ? submissionTestItems.filter(item => !item._locked || item.cancelled_in_additional_test || item.restored_in_additional_test)
+      ? submissionTestItems.filter(item => !item._locked || hasCancellationStateChange(item))
       : effectiveTestItems;
     const commissionData = {
       customerId: selectedCustomer.customer_id,
@@ -2033,7 +2223,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       formSnapshot: {
         formData: isAdditionalTestWorkflow ? { ...formData, testItems: additionalSnapshotItems } : formData,
         businessTestItems: (isSalesRequestMode || workflowMode === 'direct') ? additionalSnapshotItems : businessTestItemsSnapshot,
-        ...(isModificationMode ? { modificationBaselineTestItems } : {}),
+        ...((isModificationMode || isReviewingModification) ? { modificationBaselineTestItems } : {}),
         selectedCustomer,
         selectedPayer,
         isTransferMode,
@@ -2360,7 +2550,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
   if (requestLoading) return <div className="workflow-loading">正在载入申请内容…</div>;
   const isReadOnly = workflowMode === 'view';
   const toolbarTitle = workflowMode === 'review'
-    ? '正式开单'
+    ? (isReviewingModification ? '审批修改申请' : '正式开单')
     : workflowMode === 'view'
       ? '查看委托申请'
       : workflowMode === 'edit'
@@ -2373,7 +2563,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         ? '自行创建委托单'
         : '新建委托申请';
   const toolbarHint = workflowMode === 'review'
-    ? '根据业务申请快照填写正式检测项目，并录入 LIMS'
+    ? (isReviewingModification ? '红色表示业务修改；委托单信息审批后自动同步，检测项目请在下方人工调整' : '根据业务申请快照填写正式检测项目，并录入 LIMS')
     : workflowMode === 'view'
       ? '完整表单只读展示，内容不可修改'
       : workflowMode === 'edit'
@@ -2413,7 +2603,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
       )}
       {workflowMode === 'edit' && requestMeta?.status === 'returned' && requestMeta.reviewNote && (
         <div className="workflow-edit-notice">
-          <span>退回原因</span>
+          <span>驳回原因</span>
           <strong>{requestMeta.reviewNote}</strong>
         </div>
       )}
@@ -2446,6 +2636,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         }}
       >
         <fieldset className="workflow-form-shell" disabled={isReadOnly}>
+        <fieldset className="modification-business-fields" disabled={isReviewingModification}>
         {(['direct', 'request'].includes(workflowMode) || (workflowMode === 'edit' && (requestMeta?.requestType || 'normal') === 'normal')) && (
           <section className="order-prefill-panel" aria-labelledby="order-prefill-title">
             <div className="order-prefill-main">
@@ -2773,8 +2964,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 >
                   <input
                     type="checkbox"
-                    checked={formData.orderUrgencyType === option.value}
-                    onChange={() => setFormData(prev => ({ ...prev, orderUrgencyType: option.value }))}
+                    checked={formData.orderUrgencyType === option.value} data-modified={modificationChoiceChanged('orderUrgencyType', option.value, formData.orderUrgencyType === option.value)}
+                    onChange={() => { markModificationField('orderUrgencyType'); setFormData(prev => ({ ...prev, orderUrgencyType: option.value })); }}
                   />
                   <span>{option.label} <small>{option.english}</small></span>
                   {option.fee && <em>（{option.fee}）</em>}
@@ -2784,7 +2975,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <div className="period-delivery-time">
               <strong>交付时间 <small>Delivery time</small>：</strong>
               <span>收样后</span>
-              <input type="number" name="deliveryDays" min="0" value={formData.deliveryDays} onChange={handleInputChange} />
+              <input type="number" name="deliveryDays" data-modified={modificationFieldChanged('deliveryDays')} min="0" value={formData.deliveryDays} onChange={handleInputChange} />
               <span>个工作日 <small>（working days after sample receipt）</small></span>
             </div>
             <p className="period-type-note">注：周六、周日及节假日不计入工作日 Saturday, Sunday and festival days are not workdays</p>
@@ -2800,19 +2991,19 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <div className="report-row-label">报告版式<br/><small>Report version</small></div>
             <div className="report-row-content report-version-content">
               <div className="report-version-option">
-                <label><input type="checkbox" onChange={(e) => handleReportTypeChange('测试图片或数据汇总(无需测试报告) Test pictures or data summaries(No test report)', e.target.checked)} checked={formData.reportType.includes(1)} />测试图片或数据汇总（无需测试报告） <span>Test pictures or data summaries (No test report)</span></label>
+                <label><input type="checkbox" onChange={(e) => handleReportTypeChange('测试图片或数据汇总(无需测试报告) Test pictures or data summaries(No test report)', e.target.checked)} checked={formData.reportType.includes(1)} data-modified={modificationChoiceChanged('reportType', 1, formData.reportType.includes(1))} />测试图片或数据汇总（无需测试报告） <span>Test pictures or data summaries (No test report)</span></label>
               </div>
               {!formData.reportType.includes(1) && (
                 <div className="report-version-option report-delivery-section">
                   <div className="report-subsection-title">交付形式 <small>Delivery format</small></div>
                   <div className="report-inline-options">
-                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('仅电子版报告', true)} checked={formData.reportType.includes(4)} />仅电子版报告 <span>E-report only</span></label>
-                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('电子版+纸质版报告', true)} checked={formData.reportType.includes(5)} />电子版+纸质版报告 <span>Electronic + Printed report</span></label>
+                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('仅电子版报告', true)} checked={formData.reportType.includes(4)} data-modified={modificationChoiceChanged('reportType', 4, formData.reportType.includes(4))} />仅电子版报告 <span>E-report only</span></label>
+                    <label><input type="radio" name="reportDelivery" onChange={() => handleReportTypeChange('电子版+纸质版报告', true)} checked={formData.reportType.includes(5)} data-modified={modificationChoiceChanged('reportType', 5, formData.reportType.includes(5))} />电子版+纸质版报告 <span>Electronic + Printed report</span></label>
                   </div>
                   <div className="report-language-options">
-                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中文报告 Chinese report', true)} checked={formData.reportType.includes(2)} />中文报告 <span>Chinese report</span></label>
-                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('英文报告 English report', true)} checked={formData.reportType.includes(3)} />英文报告 <span>English report</span></label>
-                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中英文对照报告Chinese-English bilingual report', true)} checked={formData.reportType.includes(6)} />中英文对照报告 <span>Chinese-English bilingual report</span></label>
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中文报告 Chinese report', true)} checked={formData.reportType.includes(2)} data-modified={modificationChoiceChanged('reportType', 2, formData.reportType.includes(2))} />中文报告 <span>Chinese report</span></label>
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('英文报告 English report', true)} checked={formData.reportType.includes(3)} data-modified={modificationChoiceChanged('reportType', 3, formData.reportType.includes(3))} />英文报告 <span>English report</span></label>
+                    <label><input type="radio" name="reportLanguage" onChange={() => handleReportTypeChange('中英文对照报告Chinese-English bilingual report', true)} checked={formData.reportType.includes(6)} data-modified={modificationChoiceChanged('reportType', 6, formData.reportType.includes(6))} />中英文对照报告 <span>Chinese-English bilingual report</span></label>
                   </div>
                 </div>
               )}
@@ -2824,9 +3015,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               <div className="report-row">
                 <div className="report-row-label">报告标识章<br/><small>Report seals</small></div>
                 <div className="report-row-content report-inline-options">
-                  <label><input type="checkbox" value="normal" checked={formData.reportSeals.includes('normal')} onChange={handleReportSealsChange} />普通报告 <span>Normal report</span></label>
-                  <label><input type="checkbox" value="cnas" checked={formData.reportSeals.includes('cnas')} onChange={handleReportSealsChange} />CNAS</label>
-                  <label><input type="checkbox" value="cma" checked={formData.reportSeals.includes('cma')} onChange={handleReportSealsChange} />CMA</label>
+                  <label><input type="checkbox" value="normal" checked={formData.reportSeals.includes('normal')} data-modified={modificationChoiceChanged('reportSeals', 'normal', formData.reportSeals.includes('normal'))} onChange={handleReportSealsChange} />普通报告 <span>Normal report</span></label>
+                  <label><input type="checkbox" value="cnas" checked={formData.reportSeals.includes('cnas')} data-modified={modificationChoiceChanged('reportSeals', 'cnas', formData.reportSeals.includes('cnas'))} onChange={handleReportSealsChange} />CNAS</label>
+                  <label><input type="checkbox" value="cma" checked={formData.reportSeals.includes('cma')} data-modified={modificationChoiceChanged('reportSeals', 'cma', formData.reportSeals.includes('cma'))} onChange={handleReportSealsChange} />CMA</label>
                 </div>
               </div>
             </>
@@ -2835,10 +3026,10 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <div className="report-row">
               <div className="report-row-label">纸质版寄送地址<br/><small>Mailing address</small></div>
               <div className="report-row-content report-mailing-options">
-                <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} />邮寄到委托方 <span>To the applicant</span></label>
-                <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} />邮寄到付款方 <span>To the payer</span></label>
-                <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} />其他 <span>Others</span></label>
-                {formData.paperReportShippingType === '3' && <input className="report-address-input" type="text" name="reportAdditionalInfo" value={formData.reportAdditionalInfo} onChange={handleInputChange} placeholder="请输入地址、收件人和电话" />}
+                <label><input type="radio" name="paperReportShippingType" value="1" onChange={handleRadioChange} checked={formData.paperReportShippingType === '1'} data-modified={modificationChoiceChanged('paperReportShippingType', '1', formData.paperReportShippingType === '1')} />邮寄到委托方 <span>To the applicant</span></label>
+                <label><input type="radio" name="paperReportShippingType" value="2" onChange={handleRadioChange} checked={formData.paperReportShippingType === '2'} data-modified={modificationChoiceChanged('paperReportShippingType', '2', formData.paperReportShippingType === '2')} />邮寄到付款方 <span>To the payer</span></label>
+                <label><input type="radio" name="paperReportShippingType" value="3" onChange={handleRadioChange} checked={formData.paperReportShippingType === '3'} data-modified={modificationChoiceChanged('paperReportShippingType', '3', formData.paperReportShippingType === '3')} />其他 <span>Others</span></label>
+                {formData.paperReportShippingType === '3' && <input className="report-address-input" type="text" name="reportAdditionalInfo" data-modified={modificationFieldChanged('reportAdditionalInfo')} value={formData.reportAdditionalInfo} onChange={handleInputChange} placeholder="请输入地址、收件人和电话" />}
               </div>
             </div>
           )}
@@ -2848,11 +3039,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           <fieldset>
             <legend>报告抬头 Report Header&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportHeaderOptions).map(option => (
-              <label key={option}><input type="radio" name="reportHeader" value={reportHeaderOptions[option]} onClick={() => handleRadioClick('reportHeader', String(reportHeaderOptions[option]))} checked={formData.reportHeader === String(reportHeaderOptions[option])} readOnly /> {option}</label>
+              <label key={option}><input type="radio" name="reportHeader" value={reportHeaderOptions[option]} onClick={() => handleRadioClick('reportHeader', String(reportHeaderOptions[option]))} checked={formData.reportHeader === String(reportHeaderOptions[option])} data-modified={modificationChoiceChanged('reportHeader', String(reportHeaderOptions[option]), formData.reportHeader === String(reportHeaderOptions[option]))} readOnly /> {option}</label>
             ))}
             {formData.reportHeader === '2' && (
               <label style={{ display: 'block', marginTop: 8 }}>其他(地址/收件人/电话)Others
-                <input type="text" name="reportHeaderAdditionalInfo" value={formData.reportHeaderAdditionalInfo} onChange={handleInputChange} style={{ width: '60%', marginLeft: 4 }} placeholder="请输入补充信息" />
+                <input type="text" name="reportHeaderAdditionalInfo" data-modified={modificationFieldChanged('reportHeaderAdditionalInfo')} value={formData.reportHeaderAdditionalInfo} onChange={handleInputChange} style={{ width: '60%', marginLeft: 4 }} placeholder="请输入补充信息" />
               </label>
             )}
           </fieldset>
@@ -2860,7 +3051,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           <fieldset>
             <legend>报告对应方式 Report Mapping&nbsp;<span style={{ color: 'red' }}>*</span></legend>
             {Object.keys(reportFormOptions).map(option => (
-              <label key={option}><input type="radio" name="reportForm" value={reportFormOptions[option]} onClick={() => handleRadioClick('reportForm', String(reportFormOptions[option]))} checked={formData.reportForm === String(reportFormOptions[option])} readOnly /> {option}</label>
+              <label key={option}><input type="radio" name="reportForm" value={reportFormOptions[option]} onClick={() => handleRadioClick('reportForm', String(reportFormOptions[option]))} checked={formData.reportForm === String(reportFormOptions[option])} data-modified={modificationChoiceChanged('reportForm', String(reportFormOptions[option]), formData.reportForm === String(reportFormOptions[option]))} readOnly /> {option}</label>
             ))}
           </fieldset>
         </>)}
@@ -2876,17 +3067,19 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           </p>
         </fieldset>
 
+        </fieldset>
         {(workflowMode === 'review' || workflowMode === 'view') && businessTestItemsSnapshot.length > 0 && (
           <section className="business-test-snapshot">
             <div className="business-test-snapshot-heading">
-              <h3>业务申请检测项目</h3>
+              <h3>{isReviewingModification ? '业务申请检测项目（修改快照）' : '业务申请检测项目'}</h3>
               {workflowMode === 'review' && (
                 <button type="button" className="test-items-word-download-button" onClick={handleTestItemsWordDownload} disabled={testItemsWordDownloading}>
                   {testItemsWordDownloading ? '导出中…' : 'Word版导出'}
                 </button>
               )}
             </div>
-            <p>以下内容为业务提交时的原始填写，仅供开单录入参考。</p>
+            <p>{isReviewingModification ? '红色标识本次修改，下方显示修改前的值。请据此调整正式项目，业务项目不会自动覆盖 LIMS。' : '以下内容为业务提交时的原始填写，仅供开单录入参考。'}</p>
+            {isReviewingModification ? <BusinessModificationItems items={businessTestItemsSnapshot} baseline={modificationBaselineTestItems}/> : <>
             <div className="test-item-table-wrapper business-snapshot-scroll">
               <table className="business-snapshot-table">
                 <thead>
@@ -2930,6 +3123,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 </tbody>
               </table>
             </div>
+            </>}
           </section>
         )}
 
@@ -2937,20 +3131,27 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           <>
             <h3>检测项目</h3>
             <div className="test-item-table-wrapper business-entry-scroll">
-              <table className="business-test-item-table">
+              <table
+                ref={businessTableRef}
+                className="business-test-item-table resizable-business-table"
+                style={businessColumnWidths.reduce((styles, width, index) => {
+                  styles[`--business-col-${index + 1}`] = `${width}%`;
+                  return styles;
+                }, {})}
+              >
                 <thead>
                   <tr>
-                    <th className="num">序号</th>
-                    <th className="sample-wide-col">样品名称<span style={{ color: 'red' }}>*</span></th>
-                    <th className="sample-wide-col">材质<span style={{ color: 'red' }}>*</span></th>
-                    <th>样品类型<span style={{ color: 'red' }}>*</span></th>
-                    <th className="sample-wide-col">样品原号</th>
-                    <th className="business-test-name-col">检测项目<span style={{ color: 'red' }}>*</span></th>
-                    <th>检测标准<span style={{ color: 'red' }}>*</span></th>
-                    <th className="business-choice-col">到达方式<span style={{ color: 'red' }}>*</span></th>
-                    <th className="business-choice-col">是否到达<span style={{ color: 'red' }}>*</span></th>
-                    <th>数量<span style={{ color: 'red' }}>*</span></th>
-                    <th>备注</th>
+                    <th className="num">序号{renderBusinessColumnResizer(0)}</th>
+                    <th className="sample-wide-col">样品名称<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(1)}</th>
+                    <th className="sample-wide-col">材质<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(2)}</th>
+                    <th>样品类型<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(3)}</th>
+                    <th className="sample-wide-col">样品原号{renderBusinessColumnResizer(4)}</th>
+                    <th className="business-test-name-col">检测项目<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(5)}</th>
+                    <th>检测标准<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(6)}</th>
+                    <th className="business-choice-col">到达方式<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(7)}</th>
+                    <th className="business-choice-col">是否到达<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(8)}</th>
+                    <th>数量<span style={{ color: 'red' }}>*</span>{renderBusinessColumnResizer(9)}</th>
+                    <th>备注{renderBusinessColumnResizer(10)}</th>
                     <th className="action-col">操作</th>
                   </tr>
                 </thead>
@@ -2964,12 +3165,12 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                     return (
                       <tr key={index} className={`${item._locked ? 'locked-test-item-row' : (isModificationMode ? 'modification-test-item-row' : (isAdditionalTestMode ? 'additional-new-test-row' : ''))}${item.cancelled_in_additional_test ? ' cancelled-test-item-row' : ''}`}>
                         <td className="num">{index + 1}</td>
-                        <td className="sample-wide-col"><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
-                        <td className="sample-wide-col"><input type="text" value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
-                        <td><input type="text" value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
-                        <td className="sample-wide-col"><AutoGrowTextarea value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
-                        <td><textarea rows={2} value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
-                        <td><AutoGrowTextarea value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
+                        <td className="sample-wide-col"><AutoGrowTextarea rows={3} value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
+                        <td className="sample-wide-col"><AutoGrowTextarea rows={3} value={item.material || ''} onChange={e => handleTestItemChange(index, 'material', e.target.value)} /></td>
+                        <td><AutoGrowTextarea rows={3} value={sampleTypeValue} onChange={e => handleTestItemChange(index, 'sampleType', e.target.value)} /></td>
+                        <td className="sample-wide-col"><AutoGrowTextarea rows={3} value={item.original_no || ''} onChange={e => handleTestItemChange(index, 'original_no', e.target.value)} /></td>
+                        <td><AutoGrowTextarea rows={3} value={item.test_item || ''} onChange={e => handleTestItemChange(index, 'test_item', e.target.value)} disabled={isModificationMode || item._modificationNameLocked} title={isModificationMode ? '修改申请中检测项目名称不可修改' : undefined} /></td>
+                        <td><AutoGrowTextarea rows={3} value={item.test_method || ''} onChange={e => handleTestItemChange(index, 'test_method', e.target.value)} /></td>
                         <td className="business-choice-cell">
                           {arrivalMethodOptions.map(option => (
                             <label key={option.key}>
@@ -3007,20 +3208,22 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                           </label>
                         </td>
                         <td><input type="text" value={item.quantity || ''} onChange={e => handleTestItemChange(index, 'quantity', e.target.value)} /></td>
-                        <td><textarea rows={2} value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
+                        <td><AutoGrowTextarea rows={3} value={item.note || ''} onChange={e => handleTestItemChange(index, 'note', e.target.value)} /></td>
                         <td className="action-col add-remove-buttons">
-                          {!(isModificationMode || item._locked) && <><button type="button" className="copy-button" onClick={() => duplicateTestItem(index)}>复制</button><button type="button" className="remove-button" onClick={() => removeTestItem(index)}>删除</button></>}
-                          {(isModificationMode || item._locked) && <span className="locked-item-label">{isModificationMode ? '项目名称已锁定' : '原项目'}</span>}
-                          {isAdditionalTestMode && item._locked && item._historicalCancellation && (
-                            <span className={`cancellation-history-label${item.cancelled_in_additional_test ? ' is-cancelled' : ' is-restored'}`}>
-                              {item.cancelled_in_additional_test ? '此前已取消' : '已恢复取消'}
-                            </span>
-                          )}
-                          {isAdditionalTestMode && item._locked && (
-                            <button type="button" className="cancel-original-item-button" onClick={() => toggleOriginalItemCancellation(index)}>
-                              {item.cancelled_in_additional_test ? '恢复' : '取消'}
-                            </button>
-                          )}
+                          <div className="business-action-stack">
+                            {!(isModificationMode || item._locked) && <><button type="button" className="copy-button" onClick={() => duplicateTestItem(index)}>复制</button><button type="button" className="remove-button" onClick={() => removeTestItem(index)}>删除</button></>}
+                            {(isModificationMode || item._locked) && <span className="locked-item-label">{isModificationMode ? '项目名称已锁定' : '原项目'}</span>}
+                            {isAdditionalTestMode && item._locked && item._historicalCancellation && (
+                              <span className={`cancellation-history-label${item.cancelled_in_additional_test ? ' is-cancelled' : ' is-restored'}`}>
+                                {item.cancelled_in_additional_test ? '此前已取消' : '已恢复取消'}
+                              </span>
+                            )}
+                            {isAdditionalTestMode && item._locked && (
+                              <button type="button" className="cancel-original-item-button" onClick={() => toggleOriginalItemCancellation(index)}>
+                                {item.cancelled_in_additional_test ? '恢复' : '取消'}
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -3032,7 +3235,8 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           </>
         ) : (
         <>
-        {(workflowMode !== 'view' || formData.testItems.length > 0) && <h3>{workflowMode === 'review' ? '正式检测项目录入' : '检测项目'}</h3>}
+        {(workflowMode !== 'view' || formData.testItems.length > 0) && <h3>{isReviewingModification ? '正式检测项目修改（LIMS）' : workflowMode === 'review' ? '正式检测项目录入' : '检测项目'}</h3>}
+        {isReviewingModification && <p className="formal-modification-hint">以下为 LIMS 当前正式录入内容，请按上方业务修改快照人工调整。</p>}
         {(workflowMode !== 'view' || formData.testItems.length > 0) && <>
         <div className="test-item-table-wrapper formal-entry-scroll">
           <table className="test-item-table">
@@ -3062,7 +3266,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               {formData.testItems.map((item, index) => (
                 <tr key={index} onDragOver={(e) => onRowDragOver(e, index)} onDrop={(e) => onRowDrop(e, index)} onDragLeave={onRowDragLeave} className={`${item._locked ? 'formal-locked-test-row' : (isAdditionalTestWorkflow ? 'additional-new-test-row' : '')}${item.cancelled_in_additional_test ? ' cancelled-test-item-row' : ''}${dragOverIndex === index ? ' row-drag-over' : ''}`}>
                   <td className="num" style={{ whiteSpace: 'nowrap' }}>
-                    <span className="drag-handle" title={item._locked ? '原项目不可调整' : '按住拖动以调整顺序'} draggable={!item._locked} onDragStart={(e) => onHandleDragStart(e, index)} style={{ display:'inline-block', cursor:item._locked ? 'default' : 'grab', marginRight: 6, userSelect:'none' }}>⠿</span>
+                    <span className="drag-handle" title={item._locked ? '正式项目顺序保持不变' : '按住拖动以调整顺序'} draggable={!item._locked} onDragStart={(e) => onHandleDragStart(e, index)} style={{ display:'inline-block', cursor:item._locked ? 'default' : 'grab', marginRight: 6, userSelect:'none' }}>⠿</span>
                     {index + 1}
                   </td>
                   <td className="sample-wide-col"><input type="text" value={item.sampleName || ''} onChange={e => handleTestItemChange(index, 'sampleName', e.target.value)} /></td>
@@ -3213,27 +3417,28 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
         </>}
         </>
         )}
+        <div className="modification-business-fields">
         <div className="block other-requirements-block">
           {isSalesRequestMode && <div className="order-flow-note-row">
             <div className="flow-required-options">
               <strong>流转顺序：</strong>
-              <label><input type="radio" name="flowRequired" checked={formData.flowRequired === 'yes'} onChange={() => handleFlowRequiredChange('yes')} /> 是</label>
-              <label><input type="radio" name="flowRequired" checked={formData.flowRequired === 'no'} onChange={() => handleFlowRequiredChange('no')} /> 否</label>
+              <label><input disabled={isReviewingModification} type="radio" name="flowRequired" checked={formData.flowRequired === 'yes'} onChange={() => handleFlowRequiredChange('yes')} /> 是</label>
+              <label><input disabled={isReviewingModification} type="radio" name="flowRequired" checked={formData.flowRequired === 'no'} onChange={() => handleFlowRequiredChange('no')} /> 否</label>
             </div>
             {formData.flowRequired === 'yes' && <label className="flow-note-input">流转备注 <span style={{ color: 'red' }}>*</span>：
-              <AutoGrowTextarea className="order-level-flow-note" name="flowNote" value={formData.flowNote || ''} onChange={handleFlowNoteChange} maxLength={2000} placeholder="请填写流转、前处理或顺序要求" />
+              <AutoGrowTextarea disabled={isReviewingModification} className="order-level-flow-note" name="flowNote" data-modified={modificationFieldChanged('flowNote')} value={formData.flowNote || ''} onChange={handleFlowNoteChange} maxLength={2000} placeholder="请填写流转、前处理或顺序要求" />
             </label>}
           </div>}
           {['review', 'view'].includes(workflowMode) && formData.flowRequired && <div className="business-flow-reference">
             <strong>业务申请流转说明（仅供开单参考）：</strong>
-            <span>是否需要流转：{formData.flowRequired === 'yes' ? '是' : '否'}</span>
-            {formData.flowRequired === 'yes' && <span>流转备注：{formData.flowNote || '—'}</span>}
-            {workflowMode === 'review' && <small>请根据该说明，在上方“正式检测项目录入”的“流转顺序 Seq No”中人工选择 1～4。</small>}
+            <span data-modified={modificationFieldChanged('flowRequired')}>是否需要流转：{formData.flowRequired === 'yes' ? '是' : '否'}</span>
+            {formData.flowRequired === 'yes' && <span data-modified={modificationFieldChanged('flowNote')}>流转备注：{formData.flowNote || '—'}</span>}
+            {workflowMode === 'review' && !isReviewingModification && <small>请根据该说明，在上方“正式检测项目录入”的“流转顺序 Seq No”中人工选择 1～4。</small>}
           </div>}
           <div className={`other-requirements-layout${workflowMode === 'direct' ? ' is-single' : ''}`}>
             <div className="other-requirements-copy">
               <label>其他要求 Other Requirements:
-                <AutoGrowTextarea className="other-requirements-textarea" name="otherRequirements" value={formData.otherRequirements} onChange={handleOtherRequirementsChange} placeholder="填写其他特殊要求" />
+                <AutoGrowTextarea disabled={isReviewingModification} className="other-requirements-textarea" name="otherRequirements" data-modified={modificationFieldChanged('otherRequirements')} value={formData.otherRequirements} onChange={handleOtherRequirementsChange} placeholder="填写其他特殊要求" />
               </label>
               <p>
                 注Notes：<br></br>
@@ -3242,9 +3447,9 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                 <br></br>
                 3.
                 <label className="inline-selection-option">
-                  <input
+                  <input disabled={isReviewingModification}
                     type="checkbox"
-                    name="subcontractingNotAccepted"
+                    name="subcontractingNotAccepted" data-modified={modificationFieldChanged('subcontractingNotAccepted')}
                     checked={formData.subcontractingNotAccepted}
                     onChange={handleSubcontractingChange}
                   />
@@ -3295,7 +3500,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                       </div>
                       {canUploadAttachments && (
                         <label className="request-attachment-upload">
-                          <input type="file" multiple accept={group.accept} onChange={(event) => handleAttachmentSelect(event, group.kind)} />
+                          <input disabled={isReviewingModification} type="file" multiple accept={group.accept} onChange={(event) => handleAttachmentSelect(event, group.kind)} />
                           <span>＋ 上传{group.title}</span>
                         </label>
                       )}
@@ -3325,11 +3530,11 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <p>危险特性 Hazard:&nbsp;<span style={{ color: 'red' }}>*</span></p>
             {hazardOptions.map(opt => (
               <label key={opt.key} style={{ marginRight: 12 }}>
-                <input type="checkbox" checked={formData.sampleRequirements.hazards.includes(opt.key)} onChange={e => handleHazardChange(opt.key, e.target.checked)} /> {opt.label}
+                <input disabled={isReviewingModification} type="checkbox" checked={formData.sampleRequirements.hazards.includes(opt.key)} data-modified={modificationChoiceChanged('sampleRequirements.hazards', opt.key, formData.sampleRequirements.hazards.includes(opt.key))} onChange={e => handleHazardChange(opt.key, e.target.checked)} /> {opt.label}
               </label>
             ))}
             <label style={{ display: 'block', marginTop: 8 }}>其他 Others:
-              <input type="text" value={formData.sampleRequirements.hazardOther} onChange={e => handleNestedChange('sampleRequirements', 'hazardOther', e.target.value)} placeholder="请输入其他危险特性" style={{ marginLeft: 4, width: '40%' }} />
+              <input disabled={isReviewingModification} type="text" data-modified={modificationFieldChanged('sampleRequirements.hazardOther')} value={formData.sampleRequirements.hazardOther} onChange={e => handleNestedChange('sampleRequirements', 'hazardOther', e.target.value)} placeholder="请输入其他危险特性" style={{ marginLeft: 4, width: '40%' }} />
             </label>
           </div>
           <hr />
@@ -3337,7 +3542,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <p>样品磁性 Sample magnetism:&nbsp;<span style={{ color: 'red' }}>*</span></p>
             {magnetismOptions.map(opt => (
               <label key={opt.key} style={{ marginRight: 12 }}>
-                <input type="radio" name="magnetism" checked={formData.sampleRequirements.magnetism === opt.key} onClick={() => handleNestedChange('sampleRequirements', 'magnetism', opt.key)} readOnly /> {opt.label}
+                <input disabled={isReviewingModification} type="radio" name="magnetism" checked={formData.sampleRequirements.magnetism === opt.key} data-modified={modificationChoiceChanged('sampleRequirements.magnetism', opt.key, formData.sampleRequirements.magnetism === opt.key)} onClick={() => handleNestedChange('sampleRequirements', 'magnetism', opt.key)} readOnly /> {opt.label}
               </label>
             ))}
           </div>
@@ -3346,38 +3551,38 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <p>样品导电性 Sample conductivity:&nbsp;<span style={{ color: 'red' }}>*</span></p>
             {conductivityOptions.map(opt => (
               <label key={opt.key} style={{ marginRight: 12 }}>
-                <input type="radio" name="conductivity" checked={formData.sampleRequirements.conductivity === opt.key} onClick={() => handleNestedChange('sampleRequirements', 'conductivity', opt.key)} readOnly /> {opt.label}
+                <input disabled={isReviewingModification} type="radio" name="conductivity" checked={formData.sampleRequirements.conductivity === opt.key} data-modified={modificationChoiceChanged('sampleRequirements.conductivity', opt.key, formData.sampleRequirements.conductivity === opt.key)} onClick={() => handleNestedChange('sampleRequirements', 'conductivity', opt.key)} readOnly /> {opt.label}
               </label>
             ))}
           </div>
           <hr />
           <div className="sample-section">
             <p>2. 是否可以破坏 Can it be broken:&nbsp;<span style={{ color: 'red' }}>*</span></p>
-            <label style={{ marginRight: 12 }}><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'yes'} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'yes')} readOnly /> 是 Yes</label>
-            <label><input type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'no'} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'no')} readOnly /> 否 No</label>
+            <label style={{ marginRight: 12 }}><input disabled={isReviewingModification} type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'yes'} data-modified={modificationChoiceChanged('sampleRequirements.breakable', 'yes', formData.sampleRequirements.breakable === 'yes')} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'yes')} readOnly /> 是 Yes</label>
+            <label><input disabled={isReviewingModification} type="radio" name="breakable" checked={formData.sampleRequirements.breakable === 'no'} data-modified={modificationChoiceChanged('sampleRequirements.breakable', 'no', formData.sampleRequirements.breakable === 'no')} onClick={() => handleNestedChange('sampleRequirements', 'breakable', 'no')} readOnly /> 否 No</label>
           </div>
           <hr />
           <div className="sample-section">
             <p>3. 是否孤品 (As shown) :&nbsp;<span style={{ color: 'red' }}>*</span></p>
-            <label style={{ marginRight: 12 }}><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'yes'} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'yes')} readOnly /> 是 Yes</label>
-            <label><input type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'no'} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'no')} readOnly /> 否 No</label>
+            <label style={{ marginRight: 12 }}><input disabled={isReviewingModification} type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'yes'} data-modified={modificationChoiceChanged('sampleRequirements.brittle', 'yes', formData.sampleRequirements.brittle === 'yes')} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'yes')} readOnly /> 是 Yes</label>
+            <label><input disabled={isReviewingModification} type="radio" name="brittle" checked={formData.sampleRequirements.brittle === 'no'} data-modified={modificationChoiceChanged('sampleRequirements.brittle', 'no', formData.sampleRequirements.brittle === 'no')} onClick={() => handleNestedChange('sampleRequirements', 'brittle', 'no')} readOnly /> 否 No</label>
           </div>
         </fieldset>
         <fieldset>
           <legend>余样处置 Sample Handling&nbsp;<span style={{ color: 'red' }}>*</span></legend>
-          <label><input type="radio" name="sampleSolutionType" value="1" onClick={() => handleRadioClick('sampleSolutionType', '1')} checked={formData.sampleSolutionType === '1'} readOnly />由服务方处理（样品留存90天，逾期销毁）</label>
-          <label><input type="radio" name="sampleSolutionType" value="2" onClick={() => handleRadioClick('sampleSolutionType', '2')} checked={formData.sampleSolutionType === '2'} readOnly />委托方自取</label>
-          <label><input type="radio" name="sampleSolutionType" value="3" onClick={() => handleRadioClick('sampleSolutionType', '3')} checked={formData.sampleSolutionType === '3'} readOnly />服务方协助寄回 (到付)</label>
+          <label><input disabled={isReviewingModification} type="radio" name="sampleSolutionType" value="1" onClick={() => handleRadioClick('sampleSolutionType', '1')} checked={formData.sampleSolutionType === '1'} data-modified={modificationChoiceChanged('sampleSolutionType', '1', formData.sampleSolutionType === '1')} readOnly />由服务方处理（样品留存90天，逾期销毁）</label>
+          <label><input disabled={isReviewingModification} type="radio" name="sampleSolutionType" value="2" onClick={() => handleRadioClick('sampleSolutionType', '2')} checked={formData.sampleSolutionType === '2'} data-modified={modificationChoiceChanged('sampleSolutionType', '2', formData.sampleSolutionType === '2')} readOnly />委托方自取</label>
+          <label><input disabled={isReviewingModification} type="radio" name="sampleSolutionType" value="3" onClick={() => handleRadioClick('sampleSolutionType', '3')} checked={formData.sampleSolutionType === '3'} data-modified={modificationChoiceChanged('sampleSolutionType', '3', formData.sampleSolutionType === '3')} readOnly />服务方协助寄回 (到付)</label>
           {formData.sampleSolutionType === '3' && (
             <div className="nested-return-address" style={{ paddingLeft: 20 }}>
-              <label><input type="radio" name="returnAddressOption" value="same" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'same')} checked={formData.sampleReturnInfo.returnAddressOption === 'same'} readOnly />同委托方信息</label>
-              <label><input type="radio" name="returnAddressOption" value="other" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'other')} checked={formData.sampleReturnInfo.returnAddressOption === 'other'} readOnly />其他 Others (Address/Recipient/Tel):</label>
+              <label><input disabled={isReviewingModification} type="radio" name="returnAddressOption" value="same" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'same')} checked={formData.sampleReturnInfo.returnAddressOption === 'same'} data-modified={modificationChoiceChanged('sampleReturnInfo.returnAddressOption', 'same', formData.sampleReturnInfo.returnAddressOption === 'same')} readOnly />同委托方信息</label>
+              <label><input disabled={isReviewingModification} type="radio" name="returnAddressOption" value="other" onClick={() => handleNestedChange('sampleReturnInfo', 'returnAddressOption', 'other')} checked={formData.sampleReturnInfo.returnAddressOption === 'other'} data-modified={modificationChoiceChanged('sampleReturnInfo.returnAddressOption', 'other', formData.sampleReturnInfo.returnAddressOption === 'other')} readOnly />其他 Others (Address/Recipient/Tel):</label>
               {formData.sampleReturnInfo.returnAddressOption === 'other' && (
-                <input type="text" name="sampleShippingAddress" placeholder="填写退回地址/收件人/电话" value={formData.sampleShippingAddress} onChange={handleInputChange} style={{ display: 'block', marginTop: 4 }} />
+                <input disabled={isReviewingModification} type="text" name="sampleShippingAddress" data-modified={modificationFieldChanged('sampleShippingAddress')} placeholder="填写退回地址/收件人/电话" value={formData.sampleShippingAddress} onChange={handleInputChange} style={{ display: 'block', marginTop: 4 }} />
               )}
             </div>
           )}
-          <label><input type="radio" name="sampleSolutionType" value="4" onClick={() => handleRadioClick('sampleSolutionType', '4')} checked={formData.sampleSolutionType === '4'} readOnly />无剩余样品</label>
+          <label><input disabled={isReviewingModification} type="radio" name="sampleSolutionType" value="4" onClick={() => handleRadioClick('sampleSolutionType', '4')} checked={formData.sampleSolutionType === '4'} data-modified={modificationChoiceChanged('sampleSolutionType', '4', formData.sampleSolutionType === '4')} readOnly />无剩余样品</label>
         </fieldset>
         </>}
 
@@ -3439,6 +3644,22 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           </div>
         </section>
 
+        </div>
+        {isReviewingModification && <div className="modification-review-actions">
+          <button type="button" onClick={() => setShowRequestPreview(true)}>预览修改标识</button>
+          <label className="modification-review-note">审批备注（通过时可选）<input value={reviewNote} onChange={event => setReviewNote(event.target.value)} maxLength={500}/></label>
+          <ReturnReasonSelector value={returnReason} otherValue={otherReturnReason} onChange={setReturnReason} onOtherChange={setOtherReturnReason} className="modification-return-reasons" />
+          <button type="button" className="modification-return-button" disabled={modificationReviewBusy || modificationApproved} onClick={async () => {
+            const reason = resolveReturnReason(returnReason, otherReturnReason);
+            if (!returnReason) { alert("请选择驳回原因"); return; }
+            if (!reason) { alert("请填写其他驳回理由"); return; }
+            if (!window.confirm("确认驳回此修改申请？")) return;
+            setModificationReviewBusy(true);
+            try { await returnOrderRequest(requestId, reason, requestMeta?.version); navigate("/"); }
+            catch (error) { alert(error.response?.data?.message || "驳回失败"); }
+            finally { setModificationReviewBusy(false); }
+          }}>驳回申请</button>
+        </div>}
         {!isReadOnly && (
           <div className={`workflow-submit-actions${isSalesRequestMode ? ' has-preview' : ''}`}>
             {isSalesRequestMode && <button type="button" className="request-preview-button" onClick={() => setShowRequestPreview(true)}>预览</button>}
@@ -3450,7 +3671,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
             <button
               type="submit"
               className="submit"
-              disabled={requiresCompleteSignatures && Boolean(selectedCustomer) && (commissionerSignatureStatus !== 'ready' || (Boolean(salesUserId) && salesSignatureStatus !== 'ready'))}
+              disabled={modificationReviewBusy || modificationApproved || requiresCompleteSignatures && Boolean(selectedCustomer) && (commissionerSignatureStatus !== 'ready' || (Boolean(salesUserId) && salesSignatureStatus !== 'ready'))}
               title={requiresCompleteSignatures && Boolean(selectedCustomer) && commissionerSignatureStatus !== 'ready'
                 ? '请先上传委托方电子签名'
                 : requiresCompleteSignatures && Boolean(salesUserId) && salesSignatureStatus !== 'ready'
@@ -3458,7 +3679,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
                   : undefined}
             >
               {workflowMode === 'review'
-                ? '确认开单'
+                ? (isReviewingModification ? (modificationReviewBusy ? '审批及生成 PDF 中…' : '确认修改并通过审批') : '确认开单')
                 : isModificationMode
                   ? (workflowMode === 'edit' ? '保存修改修改' : '提交修改申请')
                   : isAdditionalTestMode
@@ -3483,12 +3704,12 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
           packet={{
             formSnapshot: {
               formData,
-              businessTestItems: isReviewingAdditionalTest
+              businessTestItems: (isReviewingAdditionalTest || isReviewingModification)
                 ? businessTestItemsSnapshot
                 : isAdditionalTestWorkflow
                   ? formData.testItems.filter((item) => !item._locked || item.cancelled_in_additional_test)
                   : formData.testItems,
-              ...(isModificationMode ? { modificationBaselineTestItems } : {}),
+              ...((isModificationMode || isReviewingModification) ? { modificationBaselineTestItems } : {}),
               selectedCustomer,
               selectedPayer,
               orderMonthPreference,
@@ -3507,7 +3728,7 @@ function FormPage({ workflowMode = 'direct', requestId = null }) {
               customer_signature_date: salesSignatureDate || ''
             }
           }}
-          requestMeta={isModificationMode
+          requestMeta={(isModificationMode || isReviewingModification)
             ? { ...(requestMeta || {}), request_type: 'modification' }
             : isAdditionalTestWorkflow
               ? { ...(requestMeta || {}), request_type: 'additional_test' }

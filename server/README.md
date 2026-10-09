@@ -29,8 +29,10 @@ On Windows:
 1. Install Microsoft Word and confirm that opening and exporting the template to PDF works manually.
 2. Copy `.env.pdf-worker.example` to `.env.pdf-worker`.
 3. Set `PDF_WORKER_HOST=0.0.0.0` and replace `PDF_WORKER_API_KEY` with a long random secret.
-4. Run `npm run start:pdf-worker` from the `server` directory.
+4. Run `npm run start:pdf-worker` from the `server` directory. On the bundled Windows computer, you can instead double-click `start-pdf-worker.cmd` in the project root.
 5. Allow inbound TCP port `4317` only from the Ubuntu server's LAN IP. Do not expose this port to the public Internet.
+
+To start the worker automatically whenever the current Windows user signs in, double-click `install-pdf-worker-autostart.cmd` in the project root once. It adds a minimized launcher to that user's Startup folder; the user account does not need administrator privileges. Keep the project at the same path after installing autostart. If the project is moved, run the installer again.
 
 On Ubuntu, set these values in `.env.prod` and restart the application server:
 

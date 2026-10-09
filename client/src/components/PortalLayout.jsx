@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { clearSession, getSession } from '../auth'
+import NotificationCenter from './NotificationCenter'
 import '../css/Portal.css'
 
 export default function PortalLayout({ children, wide = false, dashboard = false }) {
@@ -18,6 +19,7 @@ export default function PortalLayout({ children, wide = false, dashboard = false
           <span><strong>集萃开单</strong><small>委托申请管理系统</small></span>
         </button>
         <div className="portal-account">
+          <NotificationCenter />
           <span>{user?.name || user?.username}</span>
           <span className="portal-role">{user?.reviewer ? '开单审核' : '业务员'}</span>
           <button type="button" className="portal-link-button" onClick={() => { clearSession(); navigate('/login') }}>退出登录</button>

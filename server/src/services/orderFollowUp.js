@@ -13,6 +13,11 @@ const MODIFICATION_ITEM_FIELDS = {
   sample_type: { column: 'sample_type', payload: 'sample_type', value: clean },
   original_no: { column: 'original_no', payload: 'original_no', value: clean },
   test_method: { column: 'standard_code', payload: 'test_method', value: clean },
+  price_note: { column: 'price_note', payload: 'price_note', value: clean },
+  unit: { column: '`unit`', payload: 'unit', value: clean },
+  discount_rate: { column: 'discount_rate', payload: 'discount_rate', value: clean },
+  seq_no: { column: 'seq_no', payload: 'seq_no', value: clean },
+  service_urgency: { column: 'service_urgency', payload: 'service_urgency', value: clean },
   quantity: { column: 'quantity', payload: 'quantity', value: extractIntegerQuantity },
   note: { column: 'note', payload: 'note', value: clean },
   arrival_mode: {
@@ -22,7 +27,13 @@ const MODIFICATION_ITEM_FIELDS = {
   sample_arrival_status: {
     column: 'sample_arrival_status', payload: 'sample_arrival_status',
     value: (value) => ['arrived', 'not_arrived'].includes(value) ? value : null
-  }
+  },
+  price_id: { column: 'price_id', payload: 'price_id', value: clean },
+  test_code: { column: 'test_code', payload: 'test_code', value: clean },
+  department_id: { column: 'department_id', payload: 'department_id', value: clean },
+  group_id: { column: 'group_id', payload: 'group_id', value: clean },
+  unit_price: { column: 'unit_price', payload: 'unit_price', value: clean },
+  is_outsourced: { column: 'is_outsourced', payload: 'is_outsourced', value: (value) => value ? 1 : 0 }
 };
 
 function modificationItemUpdates(item) {
@@ -161,6 +172,14 @@ async function applyOrderModification(conn, orderId, payload) {
   );
 
   const items = Array.isArray(commission.testItems) ? commission.testItems : [];
+  const deletedIds = Array.isArray(payload?.workflow?.deletedFormalTestItemIds)
+    ? payload.workflow.deletedFormalTestItemIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+  for (const testItemId of deletedIds) {
+    await conn.query('DELETE FROM assignments WHERE test_item_id = ?', [testItemId]);
+    await conn.query('DELETE FROM test_items WHERE test_item_id = ? AND order_id = ?', [testItemId, orderId]);
+  }
+  const newItems = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
     const quantity = extractIntegerQuantity(item.quantity);
@@ -169,7 +188,11 @@ async function applyOrderModification(conn, orderId, payload) {
     }
     const testItemId = Number(item.test_item_id);
     if (!Number.isInteger(testItemId) || testItemId <= 0) {
-      throw Object.assign(new Error(`第${index + 1}行检测项目缺少正式项目标识，请刷新后重试`), { status: 409 });
+      if (!item._formal_new) {
+        throw Object.assign(new Error(`第${index + 1}行检测项目缺少正式项目标识，请刷新后重试`), { status: 409 });
+      }
+      newItems.push(item);
+      continue;
     }
     const [[existingItem]] = await conn.query(
       `SELECT test_item_id, category_name, detail_name
@@ -181,8 +204,12 @@ async function applyOrderModification(conn, orderId, payload) {
     }
     // 修改申请只写入前端明确标记为改动过的字段。旧版本请求没有标记时，
     // 只兼容写入非空值，避免空字符串把 LIMS 中已有内容覆盖掉。
-    // 检测项目名称（category_name/detail_name）始终不在修改申请中更新。
     const updates = modificationItemUpdates(item);
+    if (Array.isArray(item.modified_fields) && item.modified_fields.includes('test_item')) {
+      const [categoryName, ...detailParts] = String(item.test_item || '').split(' - ');
+      updates.push({ column: 'category_name', value: clean(categoryName) });
+      updates.push({ column: 'detail_name', value: clean(detailParts.join(' - ')) });
+    }
     if (updates.length) {
       await conn.query(
         `UPDATE test_items SET ${updates.map(({ column }) => `${column} = ?`).join(', ')}
@@ -191,14 +218,34 @@ async function applyOrderModification(conn, orderId, payload) {
       );
     }
   }
+  if (newItems.length) {
+    await appendOrderTestItems(
+      conn,
+      orderId,
+      { commissionData: { testItems: newItems }, formSnapshot: { businessTestItems: [] } },
+      payload?.workflow?.operatorUserId,
+      { isAddOn: false }
+    );
+  }
 }
 
-async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
+async function appendOrderTestItems(conn, orderId, payload, operatorUserId, options = {}) {
   const commission = payload?.commissionData || {};
   const items = Array.isArray(commission.testItems) ? commission.testItems : [];
-  if (!items.length) throw Object.assign(new Error('加测申请中没有可录入的检测项目'), { status: 400 });
+  const snapshot = payload?.formSnapshot || {};
+  const businessItems = Array.isArray(snapshot.businessTestItems)
+    ? snapshot.businessTestItems
+    : (Array.isArray(snapshot.formData?.testItems) ? snapshot.formData.testItems : []);
+  const hasCancellationOperation = businessItems.some((item) => (
+    item?.cancelled_in_additional_test || item?.restored_in_additional_test
+  ));
+  if (!items.length && !hasCancellationOperation) {
+    throw Object.assign(new Error('加测申请中没有新增项目或取消操作'), { status: 400 });
+  }
   const [[order]] = await conn.query('SELECT payer_id FROM orders WHERE order_id = ? FOR UPDATE', [orderId]);
   if (!order) throw Object.assign(new Error('关联的正式委托单不存在'), { status: 409 });
+  // 纯取消/恢复申请只推进开单系统版本，不向 LIMS 新增检测项目。
+  if (!items.length) return [];
   const [[salesperson]] = order.payer_id ? await conn.query(
     `SELECT p.owner_user_id, u.account
      FROM payers p
@@ -246,10 +293,10 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
          quantity, unit_price, discount_rate, final_unit_price, line_total, is_add_on, is_outsourced, seq_no,
          sample_name, material, sample_type, original_no, sample_preparation, note, business_note, price_note,
          arrival_mode, sample_arrival_status, service_urgency, status, supervisor_id, \`unit\`, unit_mismatch_reviewed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`,
       [
         orderId, clean(item.price_id), categoryName, detailName, clean(item.test_code || price?.test_code), clean(item.test_method || price?.standard_code),
-        departmentId, groupId, quantity, clean(price?.amount ?? item.unit_price), clean(item.discount_rate), price?.is_outsourced ? 1 : 0,
+        departmentId, groupId, quantity, clean(price?.amount ?? item.unit_price), clean(item.discount_rate), options.isAddOn === false ? 0 : 1, price?.is_outsourced ? 1 : 0,
         clean(item.seq_no), clean(item.sample_name), clean(item.material), clean(item.sample_type), clean(item.original_no), clean(item.sample_preparation), clean(item.note), null, clean(item.price_note),
         item.arrival_mode === 'mail' ? 'delivery' : clean(item.arrival_mode), ['arrived','not_arrived'].includes(item.sample_arrival_status) ? item.sample_arrival_status : 'arrived',
         item.service_urgency || 'normal', supervisorAccount, unit, price?.unit && String(price.unit).trim() !== unit ? 1 : 0
@@ -291,18 +338,97 @@ async function appendOrderTestItems(conn, orderId, payload, operatorUserId) {
   return insertedIds;
 }
 
-async function getOrderTestItemsForFlow(conn, orderId) {
+async function getOrderTestItemsForFlow(conn, orderId, lock = false) {
   const [items] = await conn.query(
     `SELECT ti.test_item_id, ti.sample_name, ti.material, ti.sample_type, ti.original_no,
             CONCAT_WS(' - ', NULLIF(ti.category_name, ''), NULLIF(ti.detail_name, '')) AS test_item,
             ti.standard_code AS test_method, ti.quantity, ti.department_id, ti.note,
-            ti.test_code, ti.seq_no, ti.service_urgency, ti.is_add_on
+            ti.test_code, ti.seq_no, ti.service_urgency, ti.is_add_on, ti.arrival_mode, ti.sample_arrival_status, ti.status,
+            ti.price_id, ti.price_note, ti.\`unit\`, ti.discount_rate, ti.group_id, ti.unit_price, ti.is_outsourced
      FROM test_items ti
      WHERE ti.order_id = ?
-     ORDER BY ti.test_item_id`,
+     ORDER BY ti.test_item_id${lock ? ' FOR UPDATE' : ''}`,
     [orderId]
   );
   return items;
 }
 
-module.exports = { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow, modificationItemUpdates };
+// 审批录入独立传入，缺失时绝不回退使用业务项目。
+async function validateFormalModificationReview(conn, orderId, review) {
+  if (!Array.isArray(review?.baseline) || !Array.isArray(review?.items)) {
+    throw Object.assign(new Error('请进入修改审批表单，核对并提交正式检测项目'), { status: 400 });
+  }
+  const current = await getOrderTestItemsForFlow(conn, orderId, true);
+  const canonical = (items) => JSON.stringify(items.map((item) =>
+    Object.keys(item).sort().map((key) => [key, item[key]])
+  ));
+  if (canonical(current) !== canonical(review.baseline)) {
+    throw Object.assign(new Error('LIMS 正式项目已变化，请刷新后重新核对'), { status: 409 });
+  }
+  const byId = new Map(current.map((item) => [Number(item.test_item_id), item]));
+  const seen = new Set();
+  const fields = [...new Set([...Object.values(MODIFICATION_ITEM_FIELDS).map((definition) => definition.payload), 'test_item'])];
+  const reviewedItems = review.items.map((item, index) => {
+    const id = Number(item.test_item_id);
+    if (!Number.isInteger(id) || id <= 0) {
+      validateFormalItem(item, index);
+      return { ...item, test_item_id: null, _formal_new: true, modified_fields: fields.filter((field) => Object.hasOwn(item, field)) };
+    }
+    const original = byId.get(id);
+    if (!original || seen.has(id)) throw Object.assign(new Error('正式项目标识无效或重复'), { status: 400 });
+    seen.add(id);
+    const modified = fields.filter((field) => Object.hasOwn(item, field)
+      && String(item[field] ?? '') !== String(original[field] ?? ''));
+    if (modified.includes('quantity') && (!Number.isInteger(Number(item.quantity)) || Number(item.quantity) <= 0)) {
+      throw Object.assign(new Error('正式项目数量必须是大于 0 的整数'), { status: 400 });
+    }
+    if (modified.includes('discount_rate') && (item.discount_rate === '' || !Number.isFinite(Number(item.discount_rate))
+      || Number(item.discount_rate) < 0 || Number(item.discount_rate) > 100)) {
+      throw Object.assign(new Error('正式项目折扣必须是 0 到 100 之间的数字'), { status: 400 });
+    }
+    if (modified.includes('seq_no') && item.seq_no !== '' && ![1, 2, 3, 4].includes(Number(item.seq_no))) {
+      throw Object.assign(new Error('正式项目流转顺序只能选择 1 到 4'), { status: 400 });
+    }
+    if (modified.includes('service_urgency') && !['normal', 'urgent_1_5x', 'urgent_2x'].includes(item.service_urgency)) {
+      throw Object.assign(new Error('正式项目加急类型无效'), { status: 400 });
+    }
+    for (const field of ['arrival_mode', 'sample_arrival_status']) {
+      const allowed = field === 'arrival_mode' ? ['on_site', 'delivery'] : ['arrived', 'not_arrived'];
+      if (modified.includes(field) && !allowed.includes(item[field])) {
+        throw Object.assign(new Error('正式项目到样信息无效'), { status: 400 });
+      }
+    }
+    return { ...original, ...Object.fromEntries(fields.filter((field) => Object.hasOwn(item, field)).map((field) => [field, item[field]])), modified_fields: modified };
+  });
+  reviewedItems.deleted_ids = current.filter((item) => !seen.has(Number(item.test_item_id))).map((item) => Number(item.test_item_id));
+  return reviewedItems;
+}
+
+function validateFormalItem(item, index) {
+  const required = [
+    ['sample_name', item.sample_name ?? item.sampleName, '样品名称'],
+    ['material', item.material, '材质'],
+    ['sample_type', item.sample_type ?? item.sampleType, '样品状态'],
+    ['price_note', item.price_note, '业务报价'],
+    ['unit', item.unit, '单位'],
+    ['test_item', item.test_item, '检测项目'],
+    ['test_method', item.test_method, '检测标准'],
+    ['arrival_mode', item.arrival_mode, '到达方式'],
+    ['sample_arrival_status', item.sample_arrival_status, '是否到达'],
+    ['service_urgency', item.service_urgency, '加急类型'],
+    ['department_id', item.department_id, '所属部门']
+  ];
+  const missing = required.find(([, value]) => value == null || String(value).trim() === '');
+  if (missing) {
+    throw Object.assign(new Error(`第${index + 1}行正式项目缺少${missing[2]}`), { status: 400 });
+  }
+  if (!Number.isInteger(Number(item.quantity)) || Number(item.quantity) <= 0) {
+    throw Object.assign(new Error(`第${index + 1}行正式项目数量必须是大于 0 的整数`), { status: 400 });
+  }
+  if (item.discount_rate === '' || !Number.isFinite(Number(item.discount_rate))
+    || Number(item.discount_rate) < 0 || Number(item.discount_rate) > 100) {
+    throw Object.assign(new Error(`第${index + 1}行正式项目折扣必须是 0 到 100 之间的数字`), { status: 400 });
+  }
+}
+
+module.exports = { applyOrderModification, appendOrderTestItems, getOrderTestItemsForFlow, modificationItemUpdates, validateFormalModificationReview };

@@ -1012,56 +1012,118 @@ button:hover {
 }
 .workflow-form-page .business-entry-scroll input,
 .workflow-form-page .business-entry-scroll textarea { min-width: 0; padding: 7px 6px; }
+.workflow-form-page .business-entry-scroll textarea.auto-grow-textarea {
+    min-height: 72px;
+}
 .workflow-form-page .business-entry-scroll .business-choice-col,
 .workflow-form-page .business-entry-scroll .business-choice-cell,
 .workflow-form-page .business-entry-scroll .business-flow-note-col { min-width: 0; }
-.workflow-form-page .business-entry-scroll .business-choice-cell { white-space: normal; }
+.workflow-form-page .business-entry-scroll .business-choice-cell {
+    white-space: normal;
+    vertical-align: middle;
+}
 .workflow-form-page .business-entry-scroll .business-choice-cell label {
-    margin: 0 4px 2px 0;
-    padding: 3px 2px;
+    display: flex;
+    width: 100%;
+    margin: 0;
+    padding: 4px 1px;
     font-size: 12px;
 }
 .workflow-form-page .business-entry-scroll th:nth-child(1),
-.workflow-form-page .business-entry-scroll td:nth-child(1) { width: 3.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(1) { width: var(--business-col-1, 3.5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(2),
-.workflow-form-page .business-entry-scroll td:nth-child(2) { width: 7.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(2) { width: var(--business-col-2, 6.5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(3),
-.workflow-form-page .business-entry-scroll td:nth-child(3) { width: 6.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(3) { width: var(--business-col-3, 6.5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(4),
-.workflow-form-page .business-entry-scroll td:nth-child(4) { width: 6.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(4) { width: var(--business-col-4, 6.5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(5),
-.workflow-form-page .business-entry-scroll td:nth-child(5) { width: 6.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(5) { width: var(--business-col-5, 8.5%) !important; min-width: 0 !important; }
+.workflow-form-page .business-entry-scroll td:nth-child(2) textarea,
+.workflow-form-page .business-entry-scroll td:nth-child(3) textarea,
+.workflow-form-page .business-entry-scroll td:nth-child(5) textarea {
+    min-width: 0 !important;
+}
 .workflow-form-page .business-entry-scroll th:nth-child(6),
-.workflow-form-page .business-entry-scroll td:nth-child(6) { width: 14.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(6) { width: var(--business-col-6, 15%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(7),
-.workflow-form-page .business-entry-scroll td:nth-child(7) { width: 13%; }
+.workflow-form-page .business-entry-scroll td:nth-child(7) { width: var(--business-col-7, 15%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(8),
-.workflow-form-page .business-entry-scroll td:nth-child(8) { width: 8.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(8) { width: var(--business-col-8, 6.5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(9),
-.workflow-form-page .business-entry-scroll td:nth-child(9) { width: 7%; }
+.workflow-form-page .business-entry-scroll td:nth-child(9) { width: var(--business-col-9, 5%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(10),
-.workflow-form-page .business-entry-scroll td:nth-child(10) { width: 9%; }
+.workflow-form-page .business-entry-scroll td:nth-child(10) { width: var(--business-col-10, 4%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(11),
-.workflow-form-page .business-entry-scroll td:nth-child(11) { width: 4.5%; }
+.workflow-form-page .business-entry-scroll td:nth-child(11) { width: var(--business-col-11, 15%) !important; min-width: 0 !important; }
 .workflow-form-page .business-entry-scroll th:nth-child(12),
-.workflow-form-page .business-entry-scroll td:nth-child(12) { width: 6%; }
-.workflow-form-page .business-entry-scroll th:nth-child(13),
-.workflow-form-page .business-entry-scroll td:nth-child(13) {
-    position: static;
-    width: 7%;
-    min-width: 0;
-    box-shadow: none;
+.workflow-form-page .business-entry-scroll td:nth-child(12) {
+    width: var(--business-col-12, 8%) !important;
+    min-width: 0 !important;
+}
+.workflow-form-page .resizable-business-table thead th {
+    overflow: visible;
+}
+.workflow-form-page .business-column-resizer {
+    position: absolute;
+    z-index: 12;
+    top: 0;
+    right: -5px;
+    width: 10px;
+    height: 100%;
+    cursor: col-resize;
+    touch-action: none;
+}
+.workflow-form-page .business-column-resizer::after {
+    position: absolute;
+    top: 7px;
+    bottom: 7px;
+    left: 4px;
+    width: 2px;
+    border-radius: 2px;
+    background: #55776a;
+    content: '';
+    opacity: 0;
+    transition: opacity .15s ease, box-shadow .15s ease;
+}
+.workflow-form-page .business-column-resizer:hover::after,
+.business-column-resizing .workflow-form-page .business-column-resizer::after {
+    opacity: .8;
+    box-shadow: 0 0 0 2px rgba(85, 119, 106, .14);
+}
+body.business-column-resizing,
+body.business-column-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
 }
 .workflow-form-page .business-entry-scroll .add-remove-buttons {
     display: table-cell;
-    white-space: nowrap;
+    white-space: normal;
 }
-.workflow-form-page .business-entry-scroll .add-remove-buttons button {
-    width: calc(50% - 2px);
+.workflow-form-page .business-entry-scroll .business-action-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 5px;
+    width: 100%;
+}
+.workflow-form-page .business-entry-scroll .business-action-stack button {
+    width: 100%;
     min-width: 0;
-    margin: 0 2px 0 0;
-    padding: 7px 1px;
+    margin: 0;
+    padding: 6px 2px;
     font-size: 12px;
+}
+.workflow-form-page .business-entry-scroll .business-action-stack .locked-item-label,
+.workflow-form-page .business-entry-scroll .business-action-stack .cancellation-history-label {
+    box-sizing: border-box;
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+    white-space: normal;
+}
+.workflow-form-page .business-entry-scroll .business-action-stack .cancel-original-item-button {
+    margin-left: 0 !important;
 }
 .workflow-form-page .business-snapshot-scroll th:nth-child(1),
 .workflow-form-page .business-snapshot-scroll td:nth-child(1) { width: 4%; }
@@ -1626,3 +1688,25 @@ button:hover {
     width: 100% !important;
     min-width: 135px !important;
 }
+
+/* 修改审批：业务快照只读，正式项目独立编辑。 */
+.modification-business-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.modification-changed-value, .workflow-review-mode [data-modified="true"],
+.workflow-review-mode label:has([data-modified="true"]) { color: #c02727 !important; font-weight: 600; background-color: #fff1f0; }
+.modification-before { display: block; margin-top: 6px; font-weight: 400; font-size: 12px; white-space: pre-wrap; }
+.formal-modification-hint { margin: -2px 0 12px; color: #68736e; }
+.modification-review-actions { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 24px 0; }
+.modification-review-actions label { display: flex; gap: 12px; align-items: center; }
+.modification-review-actions .modification-review-note { width:100%; }
+.modification-review-actions .modification-review-note input { flex:1; }
+.modification-review-actions .modification-return-reasons { flex:1 0 100%;padding:16px!important;border:1px solid #e1ddd8;border-radius:10px;background:#fff; }
+.modification-review-actions .return-reason-options { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.modification-review-actions .return-reason-options label { display:flex; }
+.modification-review-actions .return-reason-other { display:block; }
+.modification-review-actions .modification-return-button { min-width:112px;padding:10px 20px!important;border:1px solid #a92f28!important;border-radius:7px;background:#c83c32!important;color:#fff!important;box-shadow:0 3px 9px rgba(169,47,40,.24);font-weight:700;cursor:pointer; }
+.modification-review-actions .modification-return-button:hover:not(:disabled) { border-color:#8f241e!important;background:#aa2d25!important;box-shadow:0 5px 12px rgba(143,36,30,.3);transform:translateY(-1px); }
+.modification-review-actions .modification-return-button:disabled { opacity:.48;cursor:not-allowed;box-shadow:none;transform:none; }
+.workflow-review-mode .modification-business-fields:disabled input,
+.workflow-review-mode .modification-business-fields:disabled textarea { opacity: 1; }
+
+.workflow-form-page fieldset.modification-business-fields { border: 0; padding: 0; margin: 0; background: transparent; box-shadow: none; }

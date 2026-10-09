@@ -50,10 +50,17 @@ function businessItemFingerprint(item = {}) {
 }
 
 function sameBusinessItem(left = {}, right = {}) {
+  const leftFingerprint = businessItemFingerprint(left);
+  const rightFingerprint = businessItemFingerprint(right);
+  const hasBusinessIdentity = (item) => [
+    firstDefined(item.sampleName, item.sample_name), item.material,
+    firstDefined(item.original_no, item.originalNo), item.test_item,
+    firstDefined(item.test_method, item.testMethod), item.quantity
+  ].some((value) => normalizeItemValue(value) !== '');
+  if (hasBusinessIdentity(left) && hasBusinessIdentity(right)) return leftFingerprint === rightFingerprint;
   const leftId = firstDefined(left.test_item_id, left.testItemId);
   const rightId = firstDefined(right.test_item_id, right.testItemId);
-  if (leftId !== '' && rightId !== '' && String(leftId) === String(rightId)) return true;
-  return businessItemFingerprint(left) === businessItemFingerprint(right);
+  return leftId !== '' && rightId !== '' && String(leftId) === String(rightId);
 }
 
 function mergeBusinessItems(currentPayload, additionalPayloads = []) {
@@ -123,7 +130,7 @@ function buildOrderRequestPdfTemplateData(reviewedPayload, submittedPayload, ord
   if (!currentTemplateData) return null;
   const originalDates = originalApplicationSignatureDates(submittedPayload, originalApplicationDate);
   // 普通申请仍以业务最初提交的检测项目为准；修改申请审批通过后，
-  // reviewedPayload 中保存的是本次修改后的完整业务快照，PDF 必须改用它。
+  // 第一个参数由路由传入 submitted_payload 中本次修改后的完整业务快照，PDF 必须改用它。
   const isModification = reviewedPayload?.workflow?.requestType === 'modification';
   const currentBusinessItemsPayload = isModification ? reviewedPayload : submittedPayload;
   const testItems = mergeBusinessItems(currentBusinessItemsPayload, additionalSubmittedPayloads)
@@ -152,7 +159,7 @@ function additionalTestsAfterModification(additionalTests = [], modificationRevi
   if (!modificationReviewedAt) return additionalTests;
   const cutoff = new Date(modificationReviewedAt).getTime();
   if (!Number.isFinite(cutoff)) return additionalTests;
-  // 修改快照是审批时正式检测项目的完整快照，其中已包含此前完成录入的加测项。
+  // 修改快照是业务检测项目的完整快照，其中已包含此前完成录入的加测项。
   // 这里只再追加修改审批后才完成录入的加测，避免 PDF 重复显示旧加测项目。
   return additionalTests.filter((item) => {
     const appliedAt = new Date(item?.applied_at).getTime();
